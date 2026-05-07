@@ -4577,6 +4577,26 @@ pub const Type = struct {
         return null;
     }
 
+    pub fn lookupSymbolWithType(
+        self: Type,
+        analyser: *Analyser,
+        symbol: []const u8,
+    ) Error!?struct { DeclWithHandle, ?Type } {
+        if (!self.is_type_val) return null;
+        const inner_container: *Type, const lookup_target: Type = switch (self.data) {
+            .union_tag => |t| .{ t, t.* },
+            .adhoc => |adhoc| switch (adhoc) {
+                .field_enum => |t| .{ t, try t.instanceUnchecked(analyser) },
+            },
+            else => return null,
+        };
+        if (inner_container.getContainerKind() == null) return null;
+        return .{
+            try lookup_target.lookupSymbol(analyser, symbol) orelse return null,
+            try self.instanceUnchecked(analyser),
+        };
+    }
+
     pub fn lookupSymbol(
         self: Type,
         analyser: *Analyser,
@@ -6474,25 +6494,16 @@ pub fn lookupSymbolFieldInit(
 
     container_type = try container_type.typeOf(analyser);
     container_type = container_type.resolveDeclLiteralResultType();
+
+    if (try container_type.lookupSymbolWithType(analyser, field_name)) |symbol_and_ty| {
+        return symbol_and_ty;
+    }
+
     container_type = try container_type.instanceUnchecked(analyser);
 
     if (is_struct_init) {
         const decl = try container_type.lookupSymbol(analyser, field_name) orelse return null;
         return .{ decl, null };
-    }
-
-    switch (container_type.data) {
-        .union_tag => |t| {
-            const decl = try t.lookupSymbol(analyser, field_name) orelse return null;
-            return .{ decl, container_type };
-        },
-        .adhoc => |adhoc| switch (adhoc) {
-            .field_enum => |t| {
-                const decl = try lookupSymbolContainer(t.*, field_name, .field) orelse return null;
-                return .{ decl, container_type };
-            },
-        },
-        else => {},
     }
 
     switch (container_type.getContainerKind() orelse return null) {
@@ -6998,10 +7009,14 @@ pub fn getSymbolFieldAccesses(
     held_loc: offsets.Loc,
     name: []const u8,
 ) Error!?[]const DeclWithHandle {
-    var decls_with_handles: std.ArrayList(DeclWithHandle) = .empty;
+    var decls_with_handles: std.ArrayList(struct { DeclWithHandle, ?Type }) = .empty;
     var property_types: std.ArrayList(Type) = .empty;
     try analyser.getSymbolFieldAccessesArrayList(arena, handle, source_index, held_loc, name, &decls_with_handles, &property_types);
-    return try decls_with_handles.toOwnedSlice(arena);
+    const decls_slice = try arena.alloc(DeclWithHandle, decls_with_handles.items.len);
+    for (decls_with_handles.items, decls_slice) |decl_and_type, *decl| {
+        decl.* = decl_and_type.@"0";
+    }
+    return decls_slice;
 }
 
 pub fn getSymbolFieldAccessesArrayList(
@@ -7011,7 +7026,7 @@ pub fn getSymbolFieldAccessesArrayList(
     source_index: usize,
     held_loc: offsets.Loc,
     name: []const u8,
-    decls_with_handles: *std.ArrayList(DeclWithHandle),
+    decls_with_handles: *std.ArrayList(struct { DeclWithHandle, ?Type }),
     property_types: *std.ArrayList(Type),
 ) Error!void {
     const tracy_zone = tracy.trace(@src());
@@ -7023,8 +7038,11 @@ pub fn getSymbolFieldAccessesArrayList(
         const container_handle_nodes = try container_handle.getAllTypesWithHandles(analyser);
 
         for (container_handle_nodes) |t| {
-            if (try t.lookupSymbol(analyser, name)) |decl_handle|
-                try decls_with_handles.append(arena, decl_handle);
+            if (try t.lookupSymbolWithType(analyser, name)) |decl_and_type| {
+                try decls_with_handles.append(arena, decl_and_type);
+            } else if (try t.lookupSymbol(analyser, name)) |decl_handle| {
+                try decls_with_handles.append(arena, .{ decl_handle, null });
+            }
             if (try analyser.resolvePropertyType(ty, name)) |p|
                 try property_types.append(arena, p);
         }
@@ -7037,7 +7055,7 @@ pub fn getSymbolFieldAccessesHighlight(
     handle: *DocumentStore.Handle,
     source_index: usize,
     loc: offsets.Loc,
-    decls_with_handles: *std.ArrayList(DeclWithHandle),
+    decls_with_handles: *std.ArrayList(struct { DeclWithHandle, ?Type }),
     property_types: *std.ArrayList(Type),
 ) Error!?offsets.Loc {
     const name_loc, const highlight_loc = blk: {
