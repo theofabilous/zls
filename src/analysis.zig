@@ -5183,8 +5183,37 @@ pub fn getFieldAccessType(
                 // Can't call a function type, we need a function type instance.
                 if (current_type.?.is_type_val) return null;
 
-                // TODO Actually bind params here when calling functions instead of just skipping args.
-                current_type = try analyser.resolveReturnType(ty) orelse return null;
+                // TODO: this is terrible. Are there any assumptions that can be made
+                // about the token slice and/or the node slice that could accelerate the
+                // search? Is there a helper function that could be used here that I've
+                // missed?
+                //
+                // There are some functions in the `offsets` module that could possibly be
+                // of use -- notably, there are some that can find the TokenIndex for a
+                // token byte offset. This could be useful if finding a node from a
+                // TokenIndex is easier/faster or something.
+                const opt_node: ?Ast.Node.Index = x: {
+                    var node_buffer: [1]Ast.Node.Index = undefined;
+                    for (0..handle.tree.nodes.len) |node_index_int| {
+                        const node_index: Ast.Node.Index = @enumFromInt(node_index_int);
+                        const full_call = handle.tree.fullCall(&node_buffer, node_index) orelse continue;
+                        if (handle.tree.tokenStart(full_call.ast.lparen) == tok.loc.start + loc.start) {
+                            break :x node_index;
+                        }
+                    }
+                    break :x null;
+                };
+
+                const opt_resolved_type_from_node: ?Type = if (opt_node) |node|
+                    try analyser.resolveTypeOfNodeInternal(.of(node, handle))
+                else null;
+
+                if (opt_resolved_type_from_node) |resolved_type| {
+                    current_type = resolved_type;
+                } else {
+                    // TODO Actually bind params here when calling functions instead of just skipping args.
+                    current_type = try analyser.resolveReturnType(ty) orelse return null;
+                }
 
                 if (do_unwrap_error_payload) {
                     if (try analyser.resolveUnwrapErrorUnionType(current_type.?, .payload)) |unwrapped| current_type = unwrapped;
