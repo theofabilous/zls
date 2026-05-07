@@ -6486,6 +6486,12 @@ pub fn lookupSymbolFieldInit(
             const decl = try t.lookupSymbol(analyser, field_name) orelse return null;
             return .{ decl, container_type };
         },
+        .adhoc => |adhoc| switch (adhoc) {
+            .field_enum => |t| {
+                const decl = try lookupSymbolContainer(t.*, field_name, .field) orelse return null;
+                return .{ decl, container_type };
+            },
+        },
         else => {},
     }
 
