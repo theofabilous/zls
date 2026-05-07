@@ -205,6 +205,13 @@ fn typeToCompletion(builder: *Builder, ty: Analyser.Type) Analyser.Error!void {
                 try typeToCompletion(builder, t.*);
             }
         },
+        .adhoc => |adhoc| switch (adhoc) {
+            .field_enum => {
+                if (ty.is_type_val) {
+                    try collectContainerFields(builder, .enum_literal, ty, .init(.failing));
+                }
+            },
+        },
         .function,
         .error_union,
         .union_tag,
@@ -1482,6 +1489,16 @@ fn collectContainerFields(
             const ty = try container.instanceTypeVal(builder.analyser) orelse container;
             break :blk .{ info, ty };
         },
+        .adhoc => |adhoc| switch (adhoc) {
+            .field_enum => |fe| switch (fe.data) {
+                // TODO: are there any other cases (other than .container) we want to support?
+                .container => |info| .{
+                    info,
+                    try container.instanceTypeVal(builder.analyser) orelse container,
+                },
+                else => return,
+            },
+        },
         else => return,
     };
 
@@ -1508,6 +1525,9 @@ fn collectContainerFields(
 
                 const kind: types.completion.Item.Kind = switch (container.data) {
                     .union_tag => .EnumMember,
+                    .adhoc => |adhoc| switch (adhoc) {
+                        .field_enum => .EnumMember,
+                    },
                     else => if (field.ast.tuple_like) .EnumMember else .Field,
                 };
 

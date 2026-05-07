@@ -767,6 +767,16 @@ pub fn resolveFieldAccessBinding(analyser: *Analyser, lhs_binding: Binding, fiel
     if (try analyser.resolveUnionTagAccess(lhs, field_name)) |t|
         return .{ .type = t, .is_const = true };
 
+    if (lhs.data == .adhoc) x: switch (lhs.data.adhoc) {
+        .field_enum => |fe| {
+            if (!lhs.is_type_val) break :x;
+            if (try lookupSymbolContainer(fe.*, field_name, .field) != null) {
+                const inst = (try lhs.instanceTypeVal(analyser)) orelse return null;
+                return .{ .type = inst, .is_const = true };
+            }
+        },
+    };
+
     // If we are accessing a pointer type, remove one pointerness level :)
     const left_type = (try analyser.resolveDerefType(lhs)) orelse lhs;
 
@@ -942,6 +952,27 @@ pub fn resolveUnwrapErrorUnionType(analyser: *Analyser, ty: Type, side: ErrorUni
         },
         else => return null,
     };
+}
+
+fn resolveFieldEnum(analyser: *Analyser, ty: Type) error{OutOfMemory}!?Type {
+    if (!ty.is_type_val)
+        return null;
+
+    if (ty.getContainerKind()) |container| switch (container) {
+        .keyword_struct,
+        .keyword_union,
+        .keyword_enum => {},
+        else => return null,
+    } else if (!ty.isStructType(analyser) and !ty.isGenericType()) {
+        return null;
+    }
+    const newty: Type = .{
+        .data = .{ .adhoc = .{
+            .field_enum = try analyser.allocType(ty),
+        } },
+        .is_type_val = true,
+    };
+    return newty;
 }
 
 fn resolveUnionTag(analyser: *Analyser, ty: Type) Error!?Type {
@@ -2069,6 +2100,18 @@ fn resolveTypeOfNodeUncached(analyser: *Analyser, options: ResolveOptions) Error
                     // TODO: handle enum tag, e.g. `enum(u8)`
                     const tag_type = try analyser.resolveUnionTag(arg_ty) orelse return .unknown_type;
                     return try tag_type.typeOf(analyser);
+                }
+
+                if (std.mem.eql(u8, func_name, "FieldEnum")) {
+                    if (call.ast.params.len < 1) return .unknown_type;
+                    const arg = call.ast.params[0];
+                    const arg_ty = try analyser.resolveTypeOfNodeInternal(.of(arg, handle)) orelse return .unknown_type;
+
+                    if (try analyser.resolveFieldEnum(arg_ty)) |fe| {
+                        return fe;
+                    } else {
+                        return .unknown_type;
+                    }
                 }
             }
 
@@ -3233,6 +3276,8 @@ pub const Type = struct {
             index: ?InternPool.Index,
         },
 
+        adhoc: Adhoc,
+
         pub const Container = struct {
             scope_handle: ScopeWithHandle,
             bound_params: TokenToTypeMap,
@@ -3243,6 +3288,10 @@ pub const Type = struct {
                     .bound_params = .empty,
                 };
             }
+        };
+
+        pub const Adhoc = union(enum) {
+            field_enum: *Type,
         };
 
         pub const Function = struct {
@@ -3415,6 +3464,12 @@ pub const Type = struct {
                     }
                 },
                 .optional, .union_tag => |t| t.hashWithHasher(hasher),
+                .adhoc => |adhoc| {
+                    hasher.update(&.{@intFromEnum(adhoc)});
+                    switch (adhoc) {
+                        .field_enum => |fe| fe.hashWithHasher(hasher),
+                    }
+                },
                 .error_union => |info| {
                     if (info.error_set) |error_set| {
                         error_set.hashWithHasher(hasher);
@@ -3489,6 +3544,12 @@ pub const Type = struct {
                 => |a_type, name| {
                     const b_type = @field(b, @tagName(name));
                     if (!a_type.eql(b_type.*)) return false;
+                },
+                .adhoc => |adhoc| switch (adhoc) {
+                    .field_enum => |fe| {
+                        if (b.adhoc != .field_enum) return false;
+                        if (!fe.eql(b.adhoc.field_enum.*)) return false;
+                    },
                 },
                 .error_union => |info| {
                     const b_info = b.error_union;
@@ -3579,6 +3640,9 @@ pub const Type = struct {
                     return false;
                 },
                 .union_tag => |t| t.data.isGeneric(),
+                .adhoc => |adhoc| switch (adhoc) {
+                    .field_enum => |fe| fe.data.isGeneric(),
+                },
                 .container => |info| info.bound_params.count() != 0,
                 .function => |info| {
                     if (info.container_type.data.isGeneric()) {
@@ -3682,6 +3746,16 @@ pub const Type = struct {
                 .optional => |info| {
                     const child_ty = try analyser.resolveGenericTypeInternal(info.*, bound_params, visiting);
                     return try createOptional(analyser, child_ty);
+                },
+                .adhoc => |adhoc| switch (adhoc) {
+                    .field_enum => |fe| {
+                        const child_ty = try analyser.resolveGenericTypeInternal(fe.*, bound_params, visiting);
+                        if (try analyser.resolveFieldEnum(child_ty)) |new_fe| {
+                            return new_fe.data;
+                        } else {
+                            return unknown_type.data;
+                        }
+                    },
                 },
                 .error_union => |info| {
                     const error_set = if (info.error_set) |t| try analyser.resolveGenericTypeInternal(t.*, bound_params, visiting) else null;
@@ -3981,6 +4055,9 @@ pub const Type = struct {
                     if (param.type.isConditional()) return true;
                 return false;
             },
+            .adhoc => |adhoc| switch (adhoc) {
+                .field_enum => |fe| fe.isConditional(),
+            },
             .union_tag,
             .compile_error,
             .type_parameter,
@@ -4030,6 +4107,17 @@ pub const Type = struct {
                     const new_child_ty = try analyser.allocType(t);
                     try all_types.put(arena, .{ .data = .{ .optional = new_child_ty }, .is_type_val = ty.is_type_val }, {});
                 }
+            },
+            .adhoc => |adhoc| switch (adhoc) {
+                .field_enum => |child_ty| {
+                    for (try child_ty.getAllTypesWithHandles(analyser)) |t| {
+                        if (all_types.count() >= analyser.max_conditional_combos) {
+                            return true;
+                        }
+                        const new_child_ty = try analyser.allocType(t);
+                        try all_types.put(arena, .{ .data = .{ .optional = new_child_ty }, .is_type_val = ty.is_type_val }, {});
+                    }
+                },
             },
             inline .pointer, .array => |info, tag| {
                 for (try info.elem_ty.getAllTypesWithHandles(analyser)) |t| {
@@ -4642,6 +4730,13 @@ pub const Type = struct {
                 try writer.writeAll("@typeInfo(");
                 try t.rawStringify(writer, analyser, options);
                 try writer.writeAll(").@\"union\".tag_type.?");
+            },
+            .adhoc => |adhoc| switch (adhoc) {
+                .field_enum => |fe| {
+                    try writer.writeAll("meta.FieldEnum(");
+                    try fe.rawStringify(writer, analyser, options);
+                    try writer.writeAll(")");
+                },
             },
             .container => |info| {
                 const scope_handle = info.scope_handle;
