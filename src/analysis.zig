@@ -767,16 +767,6 @@ pub fn resolveFieldAccessBinding(analyser: *Analyser, lhs_binding: Binding, fiel
     if (try analyser.resolveUnionTagAccess(lhs, field_name)) |t|
         return .{ .type = t, .is_const = true };
 
-    if (lhs.data == .adhoc) x: switch (lhs.data.adhoc) {
-        .field_enum => |fe| {
-            if (!lhs.is_type_val) break :x;
-            if (try lookupSymbolContainer(fe.*, field_name, .field) != null) {
-                const inst = (try lhs.instanceTypeVal(analyser)) orelse return null;
-                return .{ .type = inst, .is_const = true };
-            }
-        },
-    };
-
     // If we are accessing a pointer type, remove one pointerness level :)
     const left_type = (try analyser.resolveDerefType(lhs)) orelse lhs;
 
@@ -785,6 +775,12 @@ pub fn resolveFieldAccessBinding(analyser: *Analyser, lhs_binding: Binding, fiel
             .type = t,
             .is_const = lhs_binding.is_const,
         };
+
+    if (try left_type.lookupSymbolWithType(analyser, field_name)) |decl_and_type| {
+        if (decl_and_type.@"1") |expr_ty| {
+            return .{ .type = expr_ty, .is_const = true };
+        }
+    }
 
     if (try left_type.lookupSymbol(analyser, field_name)) |child|
         return .{
