@@ -212,9 +212,13 @@ fn typeToCompletion(builder: *Builder, ty: Analyser.Type) Analyser.Error!void {
                 }
             },
         },
+        .union_tag => {
+            if (ty.is_type_val) {
+                try collectContainerFields(builder, .enum_literal, ty, .init(.failing));
+            }
+        },
         .function,
         .error_union,
-        .union_tag,
         .compile_error,
         .type_parameter,
         => {},
