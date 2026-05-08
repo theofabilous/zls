@@ -5527,6 +5527,9 @@ pub fn getPositionContext(
     var current_token = offsets.sourceIndexToTokenIndex(tree, line_loc.start).preferLeft();
     var previous_token_end = line_loc.start;
 
+    // Has no meaning if current context is not .field_access
+    var field_access_has_period = false;
+
     while (true) : (current_token += 1) {
         var tok: std.zig.Token = .{
             .tag = tree.tokenTag(current_token),
@@ -5583,10 +5586,21 @@ pub fn getPositionContext(
         }
 
         const curr_ctx: *Stack.State = stack.peek();
-        defer switch (stack.peek().ctx) {
-            .field_access => |*loc| loc.* = tokenLocAppend(loc.*, tok),
-            else => {},
-        };
+        defer {
+            switch (stack.peek().ctx) {
+                .field_access => |*loc| {
+                    switch (tok.tag) {
+                        .period => field_access_has_period = true,
+                        .identifier => {},
+                        else => field_access_has_period = false,
+                    }
+                    if (field_access_has_period) {
+                        loc.* = tokenLocAppend(loc.*, tok);
+                    }
+                },
+                else => field_access_has_period = false,
+            }
+        }
         const new_state: PositionContext = switch (tok.tag) {
             .multiline_string_literal_line => .{ .string_literal = tok.loc },
             .string_literal,
