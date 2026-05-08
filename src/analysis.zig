@@ -5763,6 +5763,13 @@ pub fn getPositionContext(
                 }
                 return state.ctx;
             },
+            .field_access => {
+                // Checking this fixes the following case:
+                // `std.SomeFunc(...)<completion>` yields completions for `std.<completion>`
+                if (field_access_has_period) {
+                    return state.ctx;
+                }
+            },
             else => return state.ctx,
         }
     }
