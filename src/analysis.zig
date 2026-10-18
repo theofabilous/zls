@@ -5159,6 +5159,13 @@ pub fn getFieldAccessType(
                     continue; // Outermost `while`
                 }
 
+                if (std.mem.eql(u8, binfn_name, "@This")) {
+                    if (tokenizer.next().tag != .l_paren) return null;
+                    if (tokenizer.next().tag != .r_paren) return null;
+                    current_type = try analyser.innermostContainer(handle, loc.start + tok.loc.start);
+                    continue;
+                }
+
                 log.debug("Unhandled builtin: {s}", .{offsets.locToSlice(tokenizer.buffer, tok.loc)});
                 return null;
             },
