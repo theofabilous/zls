@@ -1351,6 +1351,33 @@ test "tuple properties" {
     });
 }
 
+test "properties on @This() expressions" {
+    try testHoverWithOptions(
+        \\const Foo = u32;
+        \\const FooAlias = @This().Foo<cursor>;
+    ,
+        \\const Foo = u32
+        \\(type = u32)
+    , .{ .markup_kind = .plaintext });
+    try testHoverWithOptions(
+        \\foo: @This().Foo<cursor>,
+        \\const Foo = u32;
+    ,
+        \\const Foo = u32
+        \\(type = u32)
+    , .{ .markup_kind = .plaintext });
+    try testHoverWithOptions(
+        \\const Foo = bool;
+        \\const S = struct {
+        \\  foo: @This().Foo<cursor>,
+        \\  const Foo = u32;
+        \\};
+    ,
+        \\const Foo = u32
+        \\(type = u32)
+    , .{ .markup_kind = .plaintext });
+}
+
 test "optional unwrap" {
     try testHoverWithOptions(
         \\const foo: ?f64 = undefined;
