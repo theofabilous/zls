@@ -5159,6 +5159,55 @@ pub fn getFieldAccessType(
                     continue; // Outermost `while`
                 }
 
+                if (std.mem.eql(u8, binfn_name, "@as")) {
+                    const lparen_token = tokenizer.next();
+                    if (lparen_token.tag != .l_paren) return null;
+                    var next = tokenizer.next();
+                    var paren_count: usize = 1;
+                    var brace_count: usize = 0;
+
+                    // Find the extent of the type argument: @as(<Type>, ...)
+                    while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
+                        .l_paren => paren_count += 1,
+                        .r_paren => {
+                            paren_count -= 1;
+                            if (paren_count < 1) return null;
+                        },
+                        .l_brace => brace_count += 1,
+                        .r_brace => {
+                            if (brace_count == 0) return null;
+                            brace_count -= 1;
+                        },
+                        .comma => if (paren_count == 1 and brace_count == 0) break,
+                        else => {},
+                    } else return null;
+
+                    var as_type = try getFieldAccessType(
+                        analyser,
+                        handle,
+                        source_index,
+                        .{
+                            // `lparen_token` is the left paren after `@as`, `next` is the
+                            // comma token that terminates the first argument to `@as`
+                            .start = loc.start + lparen_token.loc.end,
+                            .end = loc.start + next.loc.start,
+                        },
+                    ) orelse return null;
+                    if (!as_type.is_type_val) return null;
+                    current_type = try as_type.instanceUnchecked(analyser);
+
+                    // Skip to the right paren
+                    while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
+                        .l_paren => paren_count += 1,
+                        .r_paren => {
+                            paren_count -= 1;
+                            if (paren_count < 1) break;
+                        },
+                        else => {},
+                    } else return null;
+                    continue;
+                }
+
                 if (std.mem.eql(u8, binfn_name, "@This")) {
                     if (tokenizer.next().tag != .l_paren) return null;
                     if (tokenizer.next().tag != .r_paren) return null;
