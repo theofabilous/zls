@@ -3344,6 +3344,15 @@ test "builtin fns return type" {
         .{ .label = "Foo", .kind = .Constant, .detail = "u32" },
         .{ .label = "bar", .kind = .Function, .detail = "fn () S" },
     });
+    try testCompletion(
+        \\const S = struct { foo: bool = 0, bar: i32 = 0 };
+        \\test {
+        \\    _ = @as(S, .{}).<cursor>
+        \\}
+    , &.{
+        .{ .label = "foo", .kind = .Field, .detail = "bool" },
+        .{ .label = "bar", .kind = .Field, .detail = "i32" },
+    });
 }
 
 test "function arguments of @Int" {
