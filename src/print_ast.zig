@@ -14,6 +14,9 @@ pub const RenderOptions = struct {
     trailing_comments: ?struct {
         filename: ?[]const u8 = null,
     } = .{},
+    raw_node_tag_names: bool = false,
+    verbose_nodes: bool = false,
+    terminal_mode: std.Io.Terminal.Mode = .no_color,
 };
 
 pub fn renderToFile(
@@ -85,10 +88,58 @@ const PrintAst = struct {
         const tree = p.tree;
         const tag = tree.nodeTag(node);
 
+        if (p.options.verbose_nodes and tag != .root) {
+            p.setColor(.dim);
+            defer p.setColor(.reset);
+            try p.w.writeByte('[');
+            {
+                p.setColor(.reset);
+                p.setColor(.blue);
+                defer {
+                    p.setColor(.reset);
+                    p.setColor(.dim);
+                }
+                try p.w.print("{}", .{@backingInt(node)});
+            }
+            try p.w.writeAll("] ");
+        }
+
+        if (p.options.verbose_nodes) {
+            p.setColor(.dim);
+            defer p.setColor(.reset);
+            // const What = enum { first, last, main, span };
+            const What = enum { first, last, span };
+            try p.w.writeAll("tokens: [");
+            inline for (0.., std.enums.values(What)) |i, what| {
+                if (i != 0) try p.w.writeByte(' ');
+                try p.w.print("{t}=", .{ what });
+                p.setColor(.reset);
+                p.setColor(.blue);
+                defer {
+                    p.setColor(.reset);
+                    p.setColor(.dim);
+                }
+                switch (what) {
+                    .first => try p.w.print("{}", .{ p.tree.tokenStart(p.tree.firstToken(node)) }),
+                    .last => try p.w.print("{}", .{ p.tree.tokenStart(p.tree.lastToken(node)) }),
+                    // .main => try p.w.print("{}", .{ p.tree.tokenStart(p.tree.nodeMainToken(node)) }),
+                    .span => {
+                        const span = p.tree.nodeToSpan(node);
+                        try p.w.print("{}..{}", .{ span.start, span.end });
+                    },
+                }
+            }
+            try p.w.writeAll("] ");
+        }
+
         // Compact style for some tags
         switch (tag) {
             .root => {
-                try p.w.writeAll("pub const root = .{");
+                {
+                    p.setColor(.bold);
+                    defer p.setColor(.reset);
+                    try p.w.writeAll("pub const root = .{");
+                }
                 p.indent += 1;
                 for (tree.rootDecls()) |decl| {
                     try p.renderItem(decl);
@@ -140,7 +191,17 @@ const PrintAst = struct {
             else => {},
         }
 
-        try p.w.print("{f}{{", .{std.zig.fmtId(nodeTagName(tag))});
+        {
+            p.setColor(.bright_magenta);
+            defer p.setColor(.reset);
+            if (p.options.raw_node_tag_names) {
+                try p.w.print("{t}", .{tag});
+            } else {
+                try p.w.print("{f}", .{std.zig.fmtId(nodeTagName(tag))});
+            }
+        }
+
+        try p.w.writeByte('{');
         p.indent += 1;
         switch (tag) {
             .@"catch",
@@ -481,7 +542,9 @@ const PrintAst = struct {
             .block_semicolon,
             => {
                 var buffer: [2]Ast.Node.Index = undefined;
-                for (tree.blockStatements(&buffer, node).?) |statement| {
+                const block_statements = tree.blockStatements(&buffer, node).?;
+                try p.renderNodeRangeVerbose(block_statements);
+                for (block_statements) |statement| {
                     try p.renderItem(statement);
                 }
             },
@@ -526,9 +589,27 @@ const PrintAst = struct {
         try p.w.splatByteAll(' ', p.indent * p.options.indent);
     }
 
+    fn terminal(p: *PrintAst) std.Io.Terminal {
+        return .{
+            .writer = p.w,
+            .mode = p.options.terminal_mode,
+        };
+    }
+
+    fn setColor(p: *PrintAst, color: std.Io.Terminal.Color) void {
+        if (p.options.terminal_mode != .no_color) {
+            p.terminal().setColor(color) catch {
+                p.options.terminal_mode = .no_color;
+            };
+        }
+    }
+
     fn renderTrailing(p: *PrintAst, token: Ast.TokenIndex) !void {
         const tree = p.tree;
         const options = p.options.trailing_comments orelse return;
+
+        p.setColor(.dim);
+        defer p.setColor(.reset);
 
         try p.w.writeAll(" // ");
         if (options.filename) |filename| {
@@ -596,7 +677,16 @@ const PrintAst = struct {
         if (opt_token) |token| {
             const tree = p.tree;
             try p.newline();
-            try p.w.print(".{s} = {f},", .{ field_name, std.zig.fmtId(tree.tokenSlice(token)) });
+            try p.w.print(".{s} = ", .{ field_name });
+            if (std.mem.eql(u8, field_name, "name_token")) {
+                p.setColor(.bold);
+                p.setColor(.green);
+            }
+            {
+                defer p.setColor(.reset);
+                try p.w.print("{f}", .{ std.zig.fmtId(tree.tokenSlice(token)) });
+            }
+            try p.w.writeByte(',');
             try p.renderTrailing(token);
         } else switch (style) {
             .always_render => {
@@ -607,12 +697,30 @@ const PrintAst = struct {
         }
     }
 
+    fn renderNodeRangeVerbose(p: *PrintAst, nodes: []const Ast.Node.Index) !void {
+        if (!p.options.verbose_nodes or nodes.len < 1) return;
+        if (nodes.len >= 2) {
+            for (1..nodes.len) |i| if (@backingInt(nodes[i]) != @backingInt(nodes[i-1])+1) return;
+        }
+        p.setColor(.dim);
+        defer p.setColor(.reset);
+        try p.w.writeAll(" range=");
+        p.setColor(.reset);
+        p.setColor(.blue);
+        defer {
+            p.setColor(.reset);
+            p.setColor(.dim);
+        }
+        try p.w.print("{}..{} ", .{ @backingInt(nodes[0]), @backingInt(nodes[nodes.len-1]) });
+    }
+
     fn renderNodeSliceField(
         p: *PrintAst,
         nodes: []const Ast.Node.Index,
         field_name: []const u8,
     ) !void {
         try p.newline();
+        try p.renderNodeRangeVerbose(nodes);
         if (nodes.len == 0) {
             return try p.w.print(".{s} = .{{}},", .{field_name});
         }
@@ -847,11 +955,48 @@ pub fn main(init: std.process.Init) !u8 {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(arena);
 
-    if (args.len != 2) {
-        std.process.fatal("expected exactly 1 argument but got {d}", .{args.len - 1});
+    if (args.len < 2) {
+        std.process.fatal("expected at least 1 argument but got {d}", .{args.len - 1});
     }
 
-    const file_path = args[1];
+    const NO_COLOR = if (init.environ_map.get("NO_COLOR")) |val| std.mem.eql(u8, val, "1") else false;
+    const CLICOLOR_FORCE = if (init.environ_map.get("CLICOLOR_FORCE")) |val| std.mem.eql(u8, val, "1") else false;
+    var render_options: RenderOptions = .{
+        .terminal_mode = std.Io.Terminal.Mode.detect(io, .stdout(), NO_COLOR, CLICOLOR_FORCE) catch .no_color,
+    };
+    var trailing_filename = true;
+    var opt_file_path: ?[:0]const u8 = null;
+
+    for (args[1..]) |arg| {
+        if (std.mem.startsWith(u8, arg, "-")) {
+            if (std.mem.eql(u8, arg, "--verbose") or std.mem.eql(u8, arg, "-v")) {
+                render_options.verbose_nodes = true;
+            } else if (std.mem.eql(u8, arg, "--raw-node-tags") or std.mem.eql(u8, arg, "-r")) {
+                render_options.raw_node_tag_names = true;
+            } else if (std.mem.eql(u8, arg, "--no-trailing-filename") or std.mem.eql(u8, arg, "-n")) {
+                trailing_filename = false;
+            } else if (std.mem.eql(u8, arg, "--")) {
+                continue;
+            } else {
+                std.process.fatal("unrecognized option: {s}", .{ arg });
+            }
+        } else {
+            if (opt_file_path != null) {
+                std.process.fatal("expected exactly 1 positional argument", .{});
+            }
+            opt_file_path = arg;
+        }
+    }
+
+    const file_path = opt_file_path orelse {
+        std.process.fatal("'filepath' positional argument is required but was not provided", .{});
+    };
+
+    if (trailing_filename) {
+        render_options.trailing_comments = .{ .filename = file_path };
+    } else {
+        render_options.trailing_comments = .{};
+    }
 
     const source = source: {
         const source_file = try std.Io.Dir.cwd().openFile(io, file_path, .{});
@@ -876,12 +1021,7 @@ pub fn main(init: std.process.Init) !u8 {
         std.log.err("{f}", .{format_error});
     }
 
-    try renderToFile(
-        &tree,
-        io,
-        .{ .trailing_comments = .{ .filename = file_path } },
-        .stdout(),
-    );
+    try renderToFile(&tree, io, render_options, .stdout());
 
     return 0;
 }
