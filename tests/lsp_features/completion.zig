@@ -52,6 +52,14 @@ test "access root scope through '@This()' builtin" {
         .{ .label = "foo", .kind = .Constant },
         .{ .label = "Self", .kind = .Struct },
     });
+    try testCompletion(
+        \\const foo = 5;
+        \\const Self = @This();
+        \\const bar = @This().<cursor>
+    , &.{
+        .{ .label = "foo", .kind = .Constant },
+        .{ .label = "Self", .kind = .Struct },
+    });
 }
 
 test "root scope with self referential decl" {
@@ -3321,6 +3329,20 @@ test "builtin fns return type" {
         .{ .label = "vector", .kind = .Field, .detail = "Vector" },
         .{ .label = "enum_literal", .kind = .Field, .detail = "void" },
         .{ .label = "spirv", .kind = .Struct, .detail = "Spirv" }, // why is only this .Struct?
+    });
+    try testCompletion(
+        \\const Foo = bool;
+        \\fn bar() void {}
+        \\const S: type = struct {
+        \\    const Foo = u32;
+        \\    pub fn bar() S {}
+        \\    test {
+        \\        _ = @This().<cursor>
+        \\    }
+        \\};
+    , &.{
+        .{ .label = "Foo", .kind = .Constant, .detail = "u32" },
+        .{ .label = "bar", .kind = .Function, .detail = "fn () S" },
     });
 }
 
