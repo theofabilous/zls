@@ -4994,6 +4994,14 @@ pub fn getFieldAccessType(
             .eof => return current_type,
             .identifier => {
                 const symbol_name = offsets.identifierIndexToSlice(tokenizer.buffer, tok.loc.start, .name);
+                const is_escaped_identifier = tokenizer.buffer[tok.loc.start] == '@';
+                if (!is_escaped_identifier) {
+                    if (try analyser.resolvePrimitive(symbol_name)) |ip_index| {
+                        std.debug.assert(analyser.ip.typeOf(ip_index) == .type_type);
+                        current_type = .fromIP(analyser, .type_type, ip_index);
+                        continue;
+                    }
+                }
                 if (try analyser.lookupSymbolGlobal(
                     handle,
                     symbol_name,
@@ -5167,7 +5175,7 @@ pub fn getFieldAccessType(
                     var brace_count: usize = 0;
 
                     // Find the extent of the type argument: @as(<Type>, ...)
-                    while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
+                    const comma_token = while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
                         .l_paren => paren_count += 1,
                         .r_paren => {
                             paren_count -= 1;
@@ -5178,7 +5186,7 @@ pub fn getFieldAccessType(
                             if (brace_count == 0) return null;
                             brace_count -= 1;
                         },
-                        .comma => if (paren_count == 1 and brace_count == 0) break,
+                        .comma => if (paren_count == 1 and brace_count == 0) break next,
                         else => {},
                     } else return null;
 
@@ -5187,15 +5195,11 @@ pub fn getFieldAccessType(
                         handle,
                         source_index,
                         .{
-                            // `lparen_token` is the left paren after `@as`, `next` is the
-                            // comma token that terminates the first argument to `@as`
                             .start = loc.start + lparen_token.loc.end,
-                            .end = loc.start + next.loc.start,
+                            .end = loc.start + comma_token.loc.start,
                         },
                     ) orelse return null;
                     if (!as_type.is_type_val) return null;
-                    as_type.is_type_val = false;
-                    current_type = as_type;
 
                     // Skip to the right paren
                     while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
@@ -5206,6 +5210,29 @@ pub fn getFieldAccessType(
                         },
                         else => {},
                     } else return null;
+
+                    const is_type_type = switch (as_type.data) {
+                        .ip_index => |payload| payload.index == .type_type,
+                        else => false,
+                    };
+
+                    if (is_type_type) {
+                        // Resolve @as(type, ...) where `type` is literally the type `type`
+                        as_type = try getFieldAccessType(
+                            analyser,
+                            handle,
+                            source_index,
+                            .{
+                                .start = loc.start + comma_token.loc.end,
+                                .end = loc.start + next.loc.start,
+                            },
+                        ) orelse return null;
+                        if (!as_type.is_type_val) return null;
+                    } else {
+                        as_type.is_type_val = false;
+                    }
+
+                    current_type = as_type;
                     continue;
                 }
 
