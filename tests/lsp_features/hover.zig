@@ -1378,6 +1378,23 @@ test "properties on @This() expressions" {
     , .{ .markup_kind = .plaintext });
 }
 
+test "properties on @as() expressions" {
+    try testHoverWithOptions(
+        \\const S = struct { foo: u32 = 0 };
+        \\comptime { _ = @as(S, .{}).foo<cursor>; }
+    ,
+        \\foo: u32 = 0
+        \\(u32)
+    , .{ .markup_kind = .plaintext });
+    try testHoverWithOptions(
+        \\const S = struct { const Foo = 5; };
+        \\comptime { _ = @as(type, S).Foo<cursor>; }
+    ,
+        \\const Foo = 5
+        \\(comptime_int)
+    , .{ .markup_kind = .plaintext });
+}
+
 test "optional unwrap" {
     try testHoverWithOptions(
         \\const foo: ?f64 = undefined;
