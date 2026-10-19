@@ -4997,6 +4997,480 @@ pub const NodeWithHandle = struct {
     }
 };
 
+const AstNodeDataVariant = std.meta.FieldEnum(Ast.Node.Data);
+fn nodeTagGetDataPayloadVariant(tag: Ast.Node.Tag) ?AstNodeDataVariant {
+    return switch (tag) {
+        .root,
+        .array_init_dot,
+        .struct_init_dot,
+        .builtin_call,
+        .container_decl,
+        .tagged_union,
+        .block,
+        .array_init_dot_comma,
+        .struct_init_dot_comma,
+        .block_semicolon,
+        .container_decl_trailing,
+        .tagged_union_trailing,
+        .builtin_call_comma,
+        => .extra_range,
+
+        .test_decl,
+        => .opt_token_and_node,
+
+        .global_var_decl,
+        .local_var_decl,
+        .fn_proto_multi,
+        .fn_proto_one,
+        .fn_proto,
+        => .extra_and_opt_node,
+
+        .simple_var_decl,
+        .array_init_dot_two,
+        .struct_init_dot_two,
+        .fn_proto_simple,
+        .builtin_call_two,
+        .container_decl_two,
+        .tagged_union_two,
+        .block_two,
+        .array_init_dot_two_comma,
+        .builtin_call_two_comma,
+        .block_two_semicolon,
+        .struct_init_dot_two_comma,
+        .container_decl_two_trailing,
+        .tagged_union_two_trailing,
+        => .opt_node_and_opt_node,
+
+        .aligned_var_decl,
+        .struct_init_one,
+        .call_one,
+        .container_field_init,
+        .for_range,
+        .call_one_comma,
+        .struct_init_one_comma,
+        => .node_and_opt_node,
+
+        .@"errdefer",
+        .@"defer",
+        .bool_not,
+        .negation,
+        .bit_not,
+        .negation_wrap,
+        .address_of,
+        .@"try",
+        .optional_type,
+        .deref,
+        .@"suspend",
+        .@"resume",
+        .@"comptime",
+        .@"nosuspend",
+        => .node,
+
+        .@"catch",
+        .equal_equal,
+        .bang_equal,
+        .less_than,
+        .greater_than,
+        .less_or_equal,
+        .greater_or_equal,
+        .assign_mul,
+        .assign_div,
+        .assign_mod,
+        .assign_add,
+        .assign_sub,
+        .assign_shl,
+        .assign_shl_sat,
+        .assign_shr,
+        .assign_bit_and,
+        .assign_bit_xor,
+        .assign_bit_or,
+        .assign_mul_wrap,
+        .assign_add_wrap,
+        .assign_sub_wrap,
+        .assign_mul_sat,
+        .assign_add_sat,
+        .assign_sub_sat,
+        .assign,
+        .merge_error_sets,
+        .mul,
+        .div,
+        .mod,
+        .mul_wrap,
+        .mul_sat,
+        .add,
+        .sub,
+        .array_cat,
+        .add_wrap,
+        .sub_wrap,
+        .add_sat,
+        .sub_sat,
+        .shl,
+        .shl_sat,
+        .shr,
+        .bit_and,
+        .bit_xor,
+        .bit_or,
+        .@"orelse",
+        .bool_and,
+        .bool_or,
+        .fn_decl,
+        .container_field_align,
+        .array_type,
+        .slice_open,
+        .array_access,
+        .array_init_one,
+        .array_init_one_comma,
+        .switch_range,
+        .while_simple,
+        .if_simple,
+        .error_union,
+        => .node_and_node,
+
+        .field_access,
+        .unwrap_optional,
+        .grouped_expression,
+        .asm_input,
+        .asm_simple,
+        => .node_and_token,
+
+        .assign_destructure,
+        .ptr_type,
+        .ptr_type_bit_range,
+        .switch_case,
+        .switch_case_inline,
+        => .extra_and_node,
+
+        .array_type_sentinel,
+        .slice,
+        .slice_sentinel,
+        .array_init,
+        .struct_init,
+        .call,
+        .@"switch",
+        .container_decl_arg,
+        .tagged_union_enum_tag,
+        .container_field,
+        .@"asm",
+        .array_init_comma,
+        .struct_init_comma,
+        .container_decl_arg_trailing,
+        .switch_comma,
+        .while_cont,
+        .@"while",
+        .for_simple,
+        .@"if",
+        .call_comma,
+        .tagged_union_enum_tag_trailing,
+        => .node_and_extra,
+
+        .ptr_type_aligned,
+        .ptr_type_sentinel,
+        .switch_case_one,
+        .switch_case_inline_one,
+        => .opt_node_and_node,
+
+        .@"continue",
+        .@"break",
+        => .opt_token_and_opt_node,
+
+        .@"return",
+        => .opt_node,
+
+        .anyframe_type,
+        => .token_and_node,
+
+        .multiline_string_literal,
+        .error_set_decl,
+        => .token_and_token,
+
+        .asm_output,
+        => .opt_node_and_token,
+
+        .@"for",
+        => .@"for",
+
+        .anyframe_literal,
+        .char_literal,
+        .number_literal,
+        .unreachable_literal,
+        .identifier,
+        .enum_literal,
+        .string_literal,
+        .error_value,
+        => null,
+    };
+}
+
+const NormalizedNodeData = struct {
+    extra: ?Ast.ExtraIndex = null,
+    tokens: std.ArrayList(Ast.TokenIndex),
+    children: std.ArrayList(Ast.Node.Index),
+    // All nodes have *at most* one node subrange
+    contiguous_children: []const Ast.Node.Index = &.{},
+
+    inline fn addItem(nnd: *NormalizedNodeData, item: anytype) !void {
+        const Item = @TypeOf(item);
+        switch (Item) {
+            Ast.Node.Index => try nnd.children.appendBounded(item),
+            Ast.Node.OptionalIndex => if (item.unwrap()) |node| try nnd.children.appendBounded(node),
+            Ast.TokenIndex => try nnd.tokens.appendBounded(item),
+            Ast.OptionalTokenIndex => if (item.unwrap()) |token| try nnd.tokens.appendBounded(token),
+            Ast.ExtraIndex => nnd.extra = item,
+            // handled elsewhere
+            Ast.Node.For => {},
+            else => comptime unreachable,
+        }
+    }
+
+    fn addContiguousChildren(nnd: *NormalizedNodeData, slice: []const Ast.Node.Index) void {
+        std.debug.assert(nnd.contiguous_children.len == 0);
+        nnd.contiguous_children = slice;
+    }
+
+    fn fill(
+        nnd: *NormalizedNodeData,
+        node: Ast.Node.Index,
+        opt_variant: ?AstNodeDataVariant,
+        node_tag: Ast.Node.Tag,
+        tree: *const Ast
+    ) error{OutOfMemory}!void {
+        try nnd.addItem(tree.nodeMainToken(node));
+        const variant = opt_variant orelse return;
+        const data = tree.nodeData(node);
+        switch (variant) {
+            // .extra_range is *always* a range of ast node indices
+            .extra_range => nnd.addContiguousChildren(tree.extraDataSlice(data.extra_range, Ast.Node.Index)),
+            .node => try nnd.addItem(data.node),
+            .opt_node => try nnd.addItem(data.opt_node),
+            .token => try nnd.addItem(data.token),
+            inline else => |t| switch (@typeInfo(@FieldType(Ast.Node.Data, @tagName(t)))) {
+                .@"struct" => {
+                    inline for (@field(data, @tagName(t))) |item| try nnd.addItem(item);
+                },
+                else => comptime unreachable,
+            },
+        }
+        if (nnd.extra) |extra_index| {
+            switch (node_tag) {
+                inline .global_var_decl,
+                .local_var_decl,
+                .container_field,
+                .slice,
+                .slice_sentinel,
+                .@"while",
+                .while_cont,
+                .@"if",
+                .array_type_sentinel,
+                .fn_proto_one,
+                => |t| {
+                    const Payload = switch (t) {
+                        .global_var_decl => Ast.Node.GlobalVarDecl,
+                        .local_var_decl => Ast.Node.LocalVarDecl,
+                        .container_field => Ast.Node.ContainerField,
+                        .slice => Ast.Node.Slice,
+                        .slice_sentinel => Ast.Node.SliceSentinel,
+                        .@"while" => Ast.Node.While,
+                        .while_cont => Ast.Node.WhileCont,
+                        .@"if" => Ast.Node.If,
+                        .array_type_sentinel => Ast.Node.ArrayTypeSentinel,
+                        .fn_proto_one => Ast.Node.FnProtoOne,
+                        else => comptime unreachable,
+                    };
+                    const extra = tree.extraData(extra_index, Payload);
+                    const info = @typeInfo(Payload).@"struct";
+                    inline for (info.field_names) |field_name| {
+                        try nnd.addItem(@field(extra, field_name));
+                    }
+                },
+                .@"for" => {
+                    const for_full = tree.forFull(node);
+                    nnd.addContiguousChildren(for_full.ast.inputs);
+                    try nnd.addItem(for_full.ast.then_expr);
+                    try nnd.addItem(for_full.ast.else_expr);
+                },
+                .fn_proto => {
+                    const extra = tree.extraData(extra_index, Ast.Node.FnProto);
+                    const subrange: Ast.Node.SubRange = .{ .start = extra.params_start, .end = extra.params_end };
+                    nnd.addContiguousChildren(tree.extraDataSlice(subrange, Ast.Node.Index));
+                },
+                .fn_proto_multi,
+                .struct_init,
+                .struct_init_comma,
+                .call,
+                .call_comma,
+                .@"switch",
+                .switch_comma,
+                .switch_case,
+                .container_decl_arg,
+                .container_decl_arg_trailing,
+                .tagged_union_enum_tag,
+                .tagged_union_enum_tag_trailing,
+                => {
+                    const extra = tree.extraData(extra_index, Ast.Node.SubRange);
+                    nnd.addContiguousChildren(tree.extraDataSlice(extra, Ast.Node.Index));
+                },
+                .@"asm" => {
+                    const extra = tree.extraData(extra_index, Ast.Node.Asm);
+                    const subrange: Ast.Node.SubRange = .{ .start = extra.items_start, .end = extra.items_end };
+                    nnd.addContiguousChildren(tree.extraDataSlice(subrange, Ast.Node.Index));
+                },
+                else => unreachable,
+            }
+        }
+    }
+};
+
+fn scopeAstNodeContainingSourceIndex(handle: *DocumentStore.Handle, source_index: usize) Error!?Ast.Node.Index {
+    const document_scope = try handle.getDocumentScope();
+    var scope_index = innermostScopeAtIndex(document_scope, source_index);
+    return while (scope_index != .root) {
+        if (document_scope.getScopeAstNode(scope_index)) |node| {
+            break node;
+        }
+        scope_index = document_scope.getScopeParent(scope_index).unwrap() orelse break .root;
+    } else .root;
+}
+
+const NodeSearch = struct {
+    const Query = struct {
+        source_range: offsets.Loc,
+        filter: std.EnumSet(Ast.Node.Tag) = .full,
+    };
+
+    const Result = enum {
+        found,
+        found_exact,
+        ///                        <search cursor>
+        ///                    [<-- node token span ....
+        ///                    [<- first token ->]  ....
+        ///                [<--query-->]
+        ///     [<--query-->]
+        ///
+        /// The search cursor is "too far to the right" with respect to the token stream.
+        /// I.e. a token pos that forms the left-edge in a token range is beyond the start of our query range.
+        ///
+        /// first_token_pos > query.source_range.start
+        out_of_range_right,
+        /// <search cursor>
+        /// ... node token span -->]
+        ///       [<- last token ->]
+        ///               [<--query-->]
+        ///                          [<--query-->]
+        ///
+        /// The search cursor is "too far to the left" with respect to the token stream.
+        /// I.e. a token pos that forms the right-edge in a token range is beyond the start of our query range.
+        ///
+        /// last_token_end_pos < query.source_range.end
+        out_of_range_left,
+    };
+
+    const Context = struct {
+        candidate: Ast.Node.OptionalIndex,
+        current_range: offsets.Loc,
+
+        const init: Context = .{
+            .candidate = .none,
+            .current_range = .{ .start = 0, .end = std.math.maxInt(isize) },
+        };
+    };
+};
+
+/// Searches for a node whose source range contains `source_range` in full.
+fn searchForNodeOfTypeInternal(
+    tree: *const Ast,
+    node: Ast.Node.Index,
+    query: NodeSearch.Query,
+    ctx: *NodeSearch.Context,
+) NodeSearch.Result {
+    const node_tag = tree.nodeTag(node);
+    const matches_filter = query.filter.contains(node_tag);
+
+    var loc: offsets.Loc = undefined;
+    loc.start = tree.tokenStart(tree.firstToken(node));
+    if (loc.start > query.source_range.start) {
+        return .out_of_range_right;
+    }
+    const last_token = tree.lastToken(node);
+    loc.end = @as(usize, tree.tokenStart(last_token)) + tree.tokenSlice(last_token).len;
+    if (loc.end < query.source_range.end) {
+        return .out_of_range_left;
+    }
+    if (ctx.current_range.start <= loc.start and ctx.current_range.end >= loc.end) {
+        ctx.current_range = loc;
+        if (matches_filter) {
+            ctx.candidate = .fromOptional(node);
+            if (std.meta.eql(ctx.current_range, query.source_range)) {
+                return .found_exact;
+            }
+        }
+    }
+
+    const opt_variant = nodeTagGetDataPayloadVariant(node_tag);
+    var node_buffer: [8]Ast.Node.Index = undefined;
+    var token_buffer: [3]Ast.TokenIndex = undefined;
+    var normalized_data: NormalizedNodeData = .{
+        .children = .initBuffer(&node_buffer),
+        .tokens = .initBuffer(&token_buffer),
+    };
+
+    NormalizedNodeData.fill(&normalized_data, node, opt_variant, node_tag, tree) catch |err| switch (err) {
+        error.OutOfMemory => log.debug("Maximum expected token/node count exceeded", .{}),
+    };
+
+    if (matches_filter) {
+        // If any token "owned" by this node contains the query range, return the node
+        // immediately. Such tokens are either the node's main token or token fields that
+        // appear in its data payload (e.g. `Data.token_and_token`, ...)
+        for (normalized_data.tokens.items) |token| {
+            const start: usize = tree.tokenStart(token);
+            const end = start + tree.tokenSlice(token).len;
+            if (start <= query.source_range.start and query.source_range.end <= end) {
+                return .found_exact;
+            }
+        }
+    }
+
+    // Iterate over any child nodes that appear in the data payload. The nodes in this
+    // list are sparse and not necessarily contiguous, so iteration does not terminate
+    // early if a non-terminal item is found to be out of range.
+    for (normalized_data.children.items) |child| {
+        switch (searchForNodeOfTypeInternal(tree, child, query, ctx)) {
+            .found_exact => |t| return t,
+            else => {},
+        }
+    }
+
+    // Iterate over the contiguous children list, if any. This list always comes from a
+    // contiguous node subrange and node order is assumed to follow source order. For this
+    // reason, we exit the loop if the node's source range is beyond the query range.
+    //
+    // TODO: for very long lists, we may want to consider using binary search?
+    for (normalized_data.contiguous_children) |child| {
+        switch (searchForNodeOfTypeInternal(tree, child, query, ctx)) {
+            .found_exact => |t| return t,
+            .out_of_range_right => break,
+            else => {},
+        }
+    }
+
+    return .found;
+}
+
+fn searchForNodeOfType(
+    analyser: *Analyser,
+    handle: *DocumentStore.Handle,
+    node: Ast.Node.Index,
+    query: NodeSearch.Query,
+) ?Ast.Node.Index {
+    _ = analyser;
+    var ctx: NodeSearch.Context = .init;
+    const result = searchForNodeOfTypeInternal(&handle.tree, node, query, &ctx);
+    return switch (result) {
+        .found, .found_exact => ctx.candidate.unwrap(),
+        else => null,
+    };
+}
+
 pub fn getFieldAccessType(
     analyser: *Analyser,
     handle: *DocumentStore.Handle,
@@ -5008,6 +5482,8 @@ pub fn getFieldAccessType(
     var current_type: ?Type = null;
 
     var do_unwrap_error_payload = false; // .keyword_try seen, ie `(try foo())`
+
+    const opt_scope_node = try scopeAstNodeContainingSourceIndex(handle, loc.start + tokenizer.index);
 
     while (true) {
         const tok = tokenizer.next();
@@ -5187,8 +5663,38 @@ pub fn getFieldAccessType(
                     var paren_count: usize = 1;
                     var brace_count: usize = 0;
 
+                    if (opt_scope_node) |scope_node| use_node: {
+                        const binfn_node = analyser.searchForNodeOfType(handle, scope_node, .{
+                            .source_range = .{
+                                .start = loc.start + tok.loc.start,
+                                .end = loc.start + tok.loc.end,
+                            },
+                            .filter = .initMany(&.{
+                                .builtin_call,
+                                .builtin_call_two,
+                                .builtin_call_two_comma,
+                                .builtin_call_comma,
+                            }),
+                        }) orelse break :use_node;
+
+                        if (try analyser.resolveTypeOfNodeInternal(.of(binfn_node, handle))) |ty| {
+                            current_type = ty;
+
+                            // Skip to the right paren
+                            while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
+                                .l_paren => paren_count += 1,
+                                .r_paren => {
+                                    paren_count -= 1;
+                                    if (paren_count < 1) break;
+                                },
+                                else => {},
+                            } else return null;
+                            continue;
+                        }
+                    }
+
                     // Find the extent of the type argument: @as(<Type>, ...)
-                    while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
+                    const comma_token = while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
                         .l_paren => paren_count += 1,
                         .r_paren => {
                             paren_count -= 1;
@@ -5199,7 +5705,7 @@ pub fn getFieldAccessType(
                             if (brace_count == 0) return null;
                             brace_count -= 1;
                         },
-                        .comma => if (paren_count == 1 and brace_count == 0) break,
+                        .comma => if (paren_count == 1 and brace_count == 0) break next,
                         else => {},
                     } else return null;
 
@@ -5208,14 +5714,13 @@ pub fn getFieldAccessType(
                         handle,
                         source_index,
                         .{
-                            // `lparen_token` is the left paren after `@as`, `next` is the
-                            // comma token that terminates the first argument to `@as`
                             .start = loc.start + lparen_token.loc.end,
-                            .end = loc.start + next.loc.start,
+                            .end = loc.start + comma_token.loc.start,
                         },
                     ) orelse return null;
+
                     if (!as_type.is_type_val) return null;
-                    current_type = try as_type.instanceUnchecked(analyser);
+                    as_type = try as_type.instanceUnchecked(analyser);
 
                     // Skip to the right paren
                     while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
@@ -5226,6 +5731,8 @@ pub fn getFieldAccessType(
                         },
                         else => {},
                     } else return null;
+
+                    current_type = as_type;
                     continue;
                 }
 
