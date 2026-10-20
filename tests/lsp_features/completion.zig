@@ -267,6 +267,21 @@ test "function" {
     , &.{
         .{ .label = "alpha", .kind = .Field, .detail = "u32" },
     });
+    try testCompletion(
+        \\const S = struct { alpha: u32 };
+        \\fn fooGeneric(comptime T: type) T { return undefined; }
+        \\const bar = fooGeneric(S).<cursor>;
+    , &.{
+        .{ .label = "alpha", .kind = .Field, .detail = "u32" },
+    });
+    try testCompletion(
+        \\const S = struct { alpha: u32 };
+        \\fn Foo(comptime T: type) type { return T; }
+        \\fn fooGeneric(comptime T: type) Foo(T) { return undefined; }
+        \\const bar = fooGeneric(S).<cursor>;
+    , &.{
+        .{ .label = "alpha", .kind = .Field, .detail = "u32" },
+    });
 }
 
 test "function alias" {
