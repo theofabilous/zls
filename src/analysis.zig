@@ -5568,13 +5568,30 @@ pub fn getFieldAccessType(
                     continue;
                 }
 
-                const ty = try analyser.resolveFuncProtoOfCallable(current_type.?) orelse return null;
+                const func_ty_from_node = if (opt_scope_node) |scope_node| use_scope: {
+                    const query: NodeSearch.Query = .{
+                        // main token for function calls is `l_paren`
+                        .source_range = .{
+                            .start = loc.start + tok.loc.start,
+                            .end = loc.start + tok.loc.end,
+                        },
+                        .filter = .initMany(&.{ .call, .call_comma, .call_one, .call_one_comma }),
+                    };
+                    const func_call_node = analyser.searchForNodeOfType(handle, scope_node, query) orelse break :use_scope null;
+                    break :use_scope try analyser.resolveTypeOfNodeInternal(.of(func_call_node, handle));
+                } else null;
 
-                // Can't call a function type, we need a function type instance.
-                if (current_type.?.is_type_val) return null;
+                if (func_ty_from_node) |ty| {
+                    current_type = ty;
+                } else {
+                    const ty = try analyser.resolveFuncProtoOfCallable(current_type.?) orelse return null;
 
-                // TODO Actually bind params here when calling functions instead of just skipping args.
-                current_type = try analyser.resolveReturnType(ty) orelse return null;
+                    // Can't call a function type, we need a function type instance.
+                    if (current_type.?.is_type_val) return null;
+
+                    // TODO Actually bind params here when calling functions instead of just skipping args.
+                    current_type = try analyser.resolveReturnType(ty) orelse return null;
+                }
 
                 if (do_unwrap_error_payload) {
                     if (try analyser.resolveUnwrapErrorUnionType(current_type.?, .payload)) |unwrapped| current_type = unwrapped;
