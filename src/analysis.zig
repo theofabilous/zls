@@ -4562,6 +4562,27 @@ pub const Type = struct {
         truncate_container_decls: bool,
     };
 
+    const FormatAlt = struct {
+        ty: Type,
+        analyser: *Analyser,
+        options: FormatOptions,
+
+        pub fn format(self: *const FormatAlt, writer: *std.Io.Writer) !void {
+            self.ty.rawStringify(writer, self.analyser, self.options) catch |err| switch (err) {
+                error.WriteFailed => |e| return e,
+                error.OutOfMemory => return error.WriteFailed,
+            };
+        }
+    };
+
+    fn formatAlt(ty: Type, analyser: *Analyser, options: FormatOptions) FormatAlt {
+        return .{
+            .ty = ty,
+            .analyser = analyser,
+            .options = options,
+        };
+    }
+
     fn rawStringify(
         ty: Type,
         writer: *std.Io.Writer,
