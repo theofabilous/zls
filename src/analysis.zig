@@ -4977,6 +4977,24 @@ pub const NodeWithHandle = struct {
     }
 };
 
+fn nodeWithMainTokenAtIndex(analyser: *Analyser, handle: *DocumentStore.Handle, options: struct {
+    source_index: usize,
+    token_tag: std.zig.Token.Tag,
+    scope_node: Ast.Node.Index,
+    /// If a node whose main token at `source_index` is found but its tag does not match
+    /// this filter, `null` will be returned.
+    node_tag_filter: std.EnumSet(Ast.Node.Tag),
+}) std.mem.Allocator.Error!?Ast.Node.Index {
+    const result = offsets.sourceIndexToTokenIndex(&handle.tree, options.source_index);
+    const token_index = result.pickTokenTag(options.token_tag, &handle.tree) orelse return null;
+    if (try ast.nodeWithMainToken(analyser.gpa, &handle.tree, token_index, options.scope_node)) |node| {
+        if (options.node_tag_filter.contains(handle.tree.nodeTag(node))) {
+            return node;
+        }
+    }
+    return null;
+}
+
 pub fn getFieldAccessType(
     analyser: *Analyser,
     handle: *DocumentStore.Handle,
@@ -4988,6 +5006,18 @@ pub fn getFieldAccessType(
     var current_type: ?Type = null;
 
     var do_unwrap_error_payload = false; // .keyword_try seen, ie `(try foo())`
+
+    const opt_scope_node: ?Ast.Node.Index = scope: {
+        const document_scope = try handle.getDocumentScope();
+        var scope_index = innermostScopeAtIndex(document_scope, source_index);
+        while (scope_index != .root) {
+            if (document_scope.getScopeAstNode(scope_index)) |node| {
+                break :scope node;
+            }
+            scope_index = document_scope.getScopeParent(scope_index).unwrap() orelse break;
+        }
+        break :scope .root;
+    };
 
     while (true) {
         const tok = tokenizer.next();
@@ -5072,13 +5102,42 @@ pub fn getFieldAccessType(
                     continue;
                 }
 
-                const ty = try analyser.resolveFuncProtoOfCallable(current_type.?) orelse return null;
+                var func_ty_from_node: ?Type = null;
+                if (opt_scope_node) |scope_node| use_node: {
+                    const func_call_node = try analyser.nodeWithMainTokenAtIndex(handle, .{
+                        .source_index = loc.start + tok.loc.start,
+                        .token_tag = .l_paren,
+                        .scope_node = scope_node,
+                        .node_tag_filter = .initMany(&.{
+                            .call,
+                            .call_comma,
+                            .call_one,
+                            .call_one_comma,
+                        }),
+                    }) orelse break :use_node;
+                    func_ty_from_node = try analyser.resolveTypeOfNodeInternal(.of(func_call_node, handle));
+                    if (func_ty_from_node == null) {
+                        log.debug("found node for func call: {}({}) but failed to resolve its type", .{
+                            func_call_node,
+                            handle.tree.nodeTag(func_call_node),
+                        });
+                    }
+                }
 
-                // Can't call a function type, we need a function type instance.
-                if (current_type.?.is_type_val) return null;
+                if (func_ty_from_node) |ty| {
+                    current_type = ty;
+                } else {
+                    const ty = try analyser.resolveFuncProtoOfCallable(current_type.?) orelse return null;
 
-                // TODO Actually bind params here when calling functions instead of just skipping args.
-                current_type = try analyser.resolveReturnType(ty) orelse return null;
+                    // Can't call a function type, we need a function type instance.
+                    if (current_type.?.is_type_val) return null;
+
+                    // TODO Actually bind params here when calling functions instead of just skipping args.
+                    current_type = try analyser.resolveReturnType(ty) orelse return null;
+                    if (current_type != null) {
+                        log.debug("failed to resolve function call from node but succeeded via token inspection", .{});
+                    }
+                }
 
                 if (do_unwrap_error_payload) {
                     if (try analyser.resolveUnwrapErrorUnionType(current_type.?, .payload)) |unwrapped| current_type = unwrapped;
@@ -5129,6 +5188,43 @@ pub fn getFieldAccessType(
             },
             .builtin => {
                 const binfn_name = tokenizer.buffer[tok.loc.start..tok.loc.end];
+
+                if (opt_scope_node) |scope_node| use_node: {
+                    var tmp_tokenizer = tokenizer;
+                    if (tmp_tokenizer.next().tag != .l_paren) {
+                        return null;
+                    }
+
+                    const binfn_node = try analyser.nodeWithMainTokenAtIndex(handle, .{
+                        .source_index = loc.start + tok.loc.start,
+                        .token_tag = .builtin,
+                        .scope_node = scope_node,
+                        .node_tag_filter = .initMany(&.{
+                            .builtin_call,
+                            .builtin_call_two,
+                            .builtin_call_two_comma,
+                            .builtin_call_comma,
+                        }),
+                    }) orelse break :use_node;
+                    if (try analyser.resolveTypeOfNodeInternal(.of(binfn_node, handle))) |ty| {
+                        current_type = ty;
+
+                        // Skip to the right paren
+                        var paren_count: usize = 1;
+                        // checked earlier on a temporary copy of the tokenizer
+                        std.debug.assert(tokenizer.next().tag == .l_paren);
+                        var next = tokenizer.next();
+                        while (next.tag != .eof) : (next = tokenizer.next()) switch (next.tag) {
+                            .l_paren => paren_count += 1,
+                            .r_paren => {
+                                paren_count -= 1;
+                                if (paren_count < 1) break;
+                            },
+                            else => {},
+                        } else return null;
+                        continue;
+                    }
+                }
 
                 if (std.mem.eql(u8, binfn_name, "@import")) {
                     if (tokenizer.next().tag != .l_paren) return null;

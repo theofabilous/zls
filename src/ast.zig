@@ -1714,6 +1714,217 @@ pub fn nodesAtLoc(allocator: std.mem.Allocator, tree: *const Ast, loc: offsets.L
     }
 }
 
+/// Search within the children of `scope_node` for the node whose main token is `token`.
+pub fn nodeWithMainToken(
+    gpa: std.mem.Allocator,
+    tree: *const Ast,
+    token: Ast.TokenIndex,
+    scope_node: Ast.Node.Index,
+) std.mem.Allocator.Error!?Ast.Node.Index {
+    if (token < tree.firstToken(scope_node) or lastToken(tree, scope_node) < token) {
+        return null;
+    }
+    var walker: Walker = try .init(gpa, tree, scope_node);
+    defer walker.deinit(gpa);
+    const token_loc = offsets.tokenToLoc(tree, token);
+    while (try walker.nextIgnoreClose(gpa, tree)) |node| {
+        if (token < tree.firstToken(node) or lastToken(tree, node) < token) {
+            std.debug.assert(!offsets.locInside(token_loc, offsets.nodeToLoc(tree, node)));
+            walker.skip();
+            continue;
+        }
+        if (token == tree.nodeMainToken(node)) {
+            return node;
+        }
+    }
+
+    const start_index, const end_index = hiddenMemberRangeMaybeOverlappingIndex(
+        tree,
+        scope_node,
+        token_loc.start
+    ) orelse return null;
+
+    for (@backingInt(start_index)..@backingInt(end_index)) |node_index| {
+        const node: Ast.Node.Index = @fromBackingInt(@intCast(node_index));
+        if (token == tree.nodeMainToken(node)) {
+            return node;
+        }
+    }
+
+    return null;
+}
+
+/// Find the range of container member nodes (and their children) that are hidden due to
+/// parse errors which could potentially contain `source_index`. This function should only
+/// be used as a fallback since it specifically looks for nodes which are inaccessible.
+///
+/// Some ast errors (like a missing semicolon after a declaration within a container)
+/// yield a tree such that the offending member node is omitted from the container's
+/// member list despite existing in the node list. These "hidden" nodes are not reachable
+/// via "regular" tree traversal but generally appear at the index that they would have
+/// appeared at if there were no ast errors.
+///
+/// See std/zig/Parse.zig @ expectTopLevelDeclRecoverable
+///
+/// Returned range is end-exclusive.
+/// Asserts the tree is in `.zig` mode.
+/// Asserts `needle_loc` is inside the range of `container_node`.
+pub fn hiddenMemberRangeMaybeOverlappingIndex(
+    tree: *const Ast,
+    container_node: Ast.Node.Index,
+    source_index: usize,
+) ?[2]Ast.Node.Index {
+    // Note that this function currently only handles containers since it appears that the
+    // syntax errors which "hide" members within containers don't actually hide nodes when
+    // inside a block. That might not be always true though, needs investigation
+    std.debug.assert(tree.mode == .zig);
+    const container_loc = offsets.nodeToLoc(tree, container_node);
+    std.debug.assert(container_loc.start <= source_index and source_index < container_loc.end);
+    if (tree.errors.len == 0) return null;
+    const node_tag = tree.nodeTag(container_node);
+    var buffer: [2]Ast.Node.Index = undefined;
+    const container = tree.fullContainerDecl(&buffer, container_node) orelse return null;
+    if (container.ast.members.len == 0) {
+        // XXX we can't currently handle this
+        // - custom `lastToken` implementation does not work for containers with empty
+        //   member lists (different code path, might be an easy fix)
+        // - handling this situation requires also solving the problem where the source
+        //   index resides in a child node that occurs before the first member list
+        //   element (described a few lines below)
+        return null;
+    }
+    // TODO consider binary search for large member lists?
+    const next_member = for (0.., container.ast.members) |i, member| {
+        // container node indices appear *after* those of their children (except for root, of course, because it
+        // is always index 0)
+        if (node_tag != .root) {
+            std.debug.assert(@backingInt(member) < @backingInt(container_node));
+        }
+        const this_loc = offsets.nodeToLoc(tree, member);
+        if (this_loc.start > source_index) break i;
+        if (this_loc.end > source_index) {
+            // we're specifically looking for nodes that were omitted from the member
+            // list, but we found a member that overlaps the index. the specific kind of
+            // ast error we're handling in this function wouldn't usually produce errors
+            // this way, so abort.
+            return null;
+        }
+    } else container.ast.members.len;
+    var edge_nodes: [2]Ast.Node.Index = undefined;
+    if (next_member == 0) {
+        if (node_tag != .root) {
+            // We don't yet have a reliable left-bound for the node indices of a non-root
+            // container's children and we specifically want to return an optimistic
+            // range. This isn't an issue for .root because its left-edge is always the
+            // root node (index 0).
+            //
+            // Eventually, we could allow the user to pass in the "parent" node or
+            // something so that we can inspect the parent to decide if we can determine
+            // some bounds, but for now just abort
+            return null;
+        }
+        edge_nodes = .{ .root, container.ast.members[0] };
+    } else if (next_member == container.ast.members.len) {
+        edge_nodes = .{
+            container.ast.members[container.ast.members.len - 1],
+            switch (node_tag) {
+                // recall that the range is end-exclusive
+                .root => @fromBackingInt(@intCast(tree.nodes.len)),
+                else => container_node,
+            },
+        };
+    } else {
+        edge_nodes = .{
+            container.ast.members[next_member - 1],
+            container.ast.members[next_member],
+        };
+    }
+    const start_index = @backingInt(edge_nodes[0]) + 1;
+    if (start_index >= @backingInt(edge_nodes[1])) {
+        return null;
+    }
+    return .{ @fromBackingInt(start_index), edge_nodes[1] };
+}
+
+test hiddenMemberRangeMaybeOverlappingIndex {
+    const test_sources = [_][:0]const u8{
+        // FIXME: this test case will fail if nested in a subcontainer because we don't
+        // yet have a generalized way to find a nice "left-bound" for the nodes that are
+        // children of a non-root container
+        //
+        // \\const baz = @FieldType(Bar, "foo").
+        // \\const Foo = struct {};
+        // \\const Bar = struct { foo: Foo, };
+        // \\
+        // ,
+        \\const Foo = struct {};
+        \\const baz = @FieldType(Bar, "foo").
+        \\const Bar = struct { foo: Foo, };
+        \\
+        ,
+        \\const Foo = struct {};
+        \\const Bar = struct { foo: Foo, };
+        \\const baz = @FieldType(Bar, "foo").
+        \\
+    };
+
+    const nested_fmt =
+        \\const S = struct {{
+        \\    {s}
+        \\}};
+        \\
+    ;
+    var arena_instance: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+    const Mode = enum { at_root, nested };
+    for (test_sources) |source| for (std.enums.values(Mode)) |mode| {
+        const tree_source = switch (mode) {
+            .at_root => source,
+            .nested => try arena.printSentinel(nested_fmt, .{source}, 0),
+        };
+        var tree: std.zig.Ast = try .parse(std.testing.allocator, tree_source, .{ .mode = .zig });
+        defer tree.deinit(std.testing.allocator);
+        try std.testing.expect(tree.errors.len > 0);
+        const needle = std.mem.find(u8, tree.source, "@FieldType").?;
+        const container_node: Ast.Node.Index = switch (mode) {
+            .at_root => .root,
+            .nested => tree.fullVarDecl(tree.rootDecls()[0]).?.ast.init_node.unwrap().?,
+        };
+
+        // expect that the node is hidden from the parent container's member list
+        var buffer: [2]Ast.Node.Index = undefined;
+        const container = tree.fullContainerDecl(&buffer, container_node).?;
+        for (container.ast.members) |member| {
+            const loc = offsets.nodeToLoc(&tree, member);
+            const member_contains_needle = loc.start <= needle and needle < loc.end;
+            try std.testing.expect(!member_contains_needle);
+        }
+
+        const start, const end = hiddenMemberRangeMaybeOverlappingIndex(&tree, container_node, needle) orelse {
+            return error.HiddenMemberRangeNotFound;
+        };
+        try std.testing.expect(@backingInt(end) > @backingInt(start));
+
+        const container_loc = offsets.nodeToLoc(&tree, container_node);
+        for (@backingInt(start)..@backingInt(end)) |i| {
+            const node: Ast.Node.Index = @fromBackingInt(@intCast(i));
+            try std.testing.expect(offsets.locInside(offsets.nodeToLoc(&tree, node), container_loc));
+            switch (tree.nodeTag(node)) {
+                .builtin_call,
+                .builtin_call_comma,
+                .builtin_call_two,
+                .builtin_call_two_comma,
+                => if (tree.tokenStart(tree.nodeMainToken(node)) == needle) break,
+                else => continue,
+            }
+        } else {
+            std.testing.failPrint("Failed to find hidden member:\n{s}\n", .{tree_source});
+            return error.HiddenMemberNotFound;
+        }
+    };
+}
+
 /// the following code can be described as the the following problem:
 /// @param children a non-intersecting list of source ranges
 /// @param loc be a source range
