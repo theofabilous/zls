@@ -967,6 +967,8 @@ pub fn main(init: std.process.Init) !u8 {
     var trailing_filename = true;
     const StatsMode = enum { only, only_check, yes, no };
     var stats_mode: StatsMode = .yes;
+    const TokenStartsMode = enum { cached, uncached };
+    var token_starts_mode: TokenStartsMode = .cached;
     var opt_file_path: ?[:0]const u8 = null;
 
     for (args[1..]) |arg| {
@@ -983,6 +985,8 @@ pub fn main(init: std.process.Init) !u8 {
                 stats_mode = .only_check;
             } else if (std.mem.eql(u8, arg, "--no-stats")) {
                 stats_mode = .no;
+            } else if (std.mem.eql(u8, arg, "--no-cache-token-starts")) {
+                token_starts_mode = .uncached;
             } else if (std.mem.eql(u8, arg, "--")) {
                 continue;
             } else {
@@ -1040,6 +1044,7 @@ pub fn main(init: std.process.Init) !u8 {
 
         const SortContext = struct {
             ast_tree: *const Ast,
+            token_starts_kind: TokenStartsMode,
             token_starts: []const u32,
             token_ends: []const u32,
             fail_count: *std.atomic.Value(usize),
@@ -1063,20 +1068,19 @@ pub fn main(init: std.process.Init) !u8 {
                 return ctx.token_ends[@backingInt(a)] < ctx.token_ends[@backingInt(b)];
             }
 
-            fn checkRangeIndicesOverlap(ctx: @This(), index_list: []const Ast.Node.Index, first_index: usize, last_index: usize) void {
+            fn checkRangeIndicesOverlapInner(ctx: @This(), comptime token_starts_kind: TokenStartsMode, index_list: []const Ast.Node.Index, first_index: usize, last_index: usize) void {
                 std.debug.print("check task: {}..{}\n", .{first_index, last_index});
                 const sublice = index_list[first_index..last_index];
                 var fail_count: usize = 0;
                 var ok_count: usize = 0;
                 for (first_index..last_index, sublice) |i, a| for (index_list[i..]) |b| {
-                    const a_start = ctx.token_starts[@backingInt(a)];
-                    const b_start = ctx.token_starts[@backingInt(b)];
-                    // const a_start = firstTokenStart(ctx.ast_tree, a);
-                    // const b_start = firstTokenStart(ctx.ast_tree, b);
+                    const a_start, const b_start = switch (comptime token_starts_kind) {
+                        .cached => .{ ctx.token_starts[@backingInt(a)], ctx.token_starts[@backingInt(b)] },
+                        .uncached => .{ firstTokenStart(ctx.ast_tree, a), firstTokenStart(ctx.ast_tree, b) },
+                    };
                     std.debug.assert(b_start >= a_start);
                     const a_end = ctx.token_ends[@backingInt(a)];
                     const b_end = ctx.token_ends[@backingInt(b)];
-
                     const is_not_ok = b_start > a_start and b_start < a_end and b_end > a_end;
                     if (is_not_ok) {
                         @branchHint(.unlikely);
@@ -1092,6 +1096,17 @@ pub fn main(init: std.process.Init) !u8 {
                 };
                 _ = ctx.ok_count.fetchAdd(ok_count, .acq_rel);
                 _ = ctx.fail_count.fetchAdd(fail_count, .acq_rel);
+            }
+
+            fn checkRangeIndicesOverlap(
+                ctx: @This(),
+                index_list: []const Ast.Node.Index,
+                first_index: usize,
+                last_index: usize
+            ) void {
+                switch (ctx.token_starts_kind) {
+                    inline else => |t| checkRangeIndicesOverlapInner(ctx, t, index_list, first_index, last_index),
+                }
             }
         };
 
@@ -1109,6 +1124,7 @@ pub fn main(init: std.process.Init) !u8 {
         var ok_count: std.atomic.Value(usize) = .init(0);
         const ctx: SortContext = .{
             .ast_tree = &tree,
+            .token_starts_kind = token_starts_mode,
             .token_ends = token_ends,
             .token_starts = token_starts,
             .ok_count = &ok_count,
@@ -1124,7 +1140,6 @@ pub fn main(init: std.process.Init) !u8 {
             try w.writeAll("\n---- Stats ----\n");
             for (indices) |node| {
                 const start = SortContext.firstTokenStart(&tree, node);
-                // const end = SortContext.lastTokenEnd(&tree, node);
                 const end = token_ends[@backingInt(node)];
                 try w.print("- {: <5} .{s: <25} :: {: <6}, {: <6}\n", .{
                     @backingInt(node), @tagName(tree.nodeTag(node)),
