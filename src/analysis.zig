@@ -5465,10 +5465,14 @@ fn searchForNodeOfType(
     _ = analyser;
     var ctx: NodeSearch.Context = .init;
     const result = searchForNodeOfTypeInternal(&handle.tree, node, query, &ctx);
-    return switch (result) {
+    const result_node = switch (result) {
         .found, .found_exact => ctx.candidate.unwrap(),
         else => null,
     };
+    if (result_node == null) {
+        log.debug("searchForNodeOfType: could not find node ({} ast errors)", .{ handle.tree.errors.len });
+    }
+    return result_node;
 }
 
 pub fn getFieldAccessType(
@@ -5568,7 +5572,8 @@ pub fn getFieldAccessType(
                     continue;
                 }
 
-                const func_ty_from_node = if (opt_scope_node) |scope_node| use_scope: {
+                var func_ty_from_node: ?Type = null;
+                if (opt_scope_node) |scope_node| {
                     const query: NodeSearch.Query = .{
                         // main token for function calls is `l_paren`
                         .source_range = .{
@@ -5577,9 +5582,16 @@ pub fn getFieldAccessType(
                         },
                         .filter = .initMany(&.{ .call, .call_comma, .call_one, .call_one_comma }),
                     };
-                    const func_call_node = analyser.searchForNodeOfType(handle, scope_node, query) orelse break :use_scope null;
-                    break :use_scope try analyser.resolveTypeOfNodeInternal(.of(func_call_node, handle));
-                } else null;
+                    if (analyser.searchForNodeOfType(handle, scope_node, query)) |call_node| {
+                        func_ty_from_node = try analyser.resolveTypeOfNodeInternal(.of(call_node, handle));
+                        if (func_ty_from_node == null) {
+                            log.debug("found node for func call: {}({}) but failed to resolve its type", .{
+                                call_node,
+                                handle.tree.nodeTag(call_node),
+                            });
+                        }
+                    }
+                }
 
                 if (func_ty_from_node) |ty| {
                     current_type = ty;
@@ -5591,6 +5603,9 @@ pub fn getFieldAccessType(
 
                     // TODO Actually bind params here when calling functions instead of just skipping args.
                     current_type = try analyser.resolveReturnType(ty) orelse return null;
+                    if (current_type != null) {
+                        log.debug("failed to resolve function call from node but succeeded via token inspection", .{});
+                    }
                 }
 
                 if (do_unwrap_error_payload) {
