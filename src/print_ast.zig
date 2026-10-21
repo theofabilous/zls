@@ -965,6 +965,8 @@ pub fn main(init: std.process.Init) !u8 {
         .terminal_mode = std.Io.Terminal.Mode.detect(io, .stdout(), NO_COLOR, CLICOLOR_FORCE) catch .no_color,
     };
     var trailing_filename = true;
+    const StatsMode = enum { only, only_check, yes, no };
+    var stats_mode: StatsMode = .yes;
     var opt_file_path: ?[:0]const u8 = null;
 
     for (args[1..]) |arg| {
@@ -975,6 +977,12 @@ pub fn main(init: std.process.Init) !u8 {
                 render_options.raw_node_tag_names = true;
             } else if (std.mem.eql(u8, arg, "--no-trailing-filename") or std.mem.eql(u8, arg, "-n")) {
                 trailing_filename = false;
+            } else if (std.mem.eql(u8, arg, "--stats-only")) {
+                stats_mode = .only;
+            } else if (std.mem.eql(u8, arg, "--stats-only-check")) {
+                stats_mode = .only_check;
+            } else if (std.mem.eql(u8, arg, "--no-stats")) {
+                stats_mode = .no;
             } else if (std.mem.eql(u8, arg, "--")) {
                 continue;
             } else {
@@ -1021,7 +1029,127 @@ pub fn main(init: std.process.Init) !u8 {
         std.log.err("{f}", .{format_error});
     }
 
-    try renderToFile(&tree, io, render_options, .stdout());
+    switch (stats_mode) {
+        .only, .only_check => {},
+        else => try renderToFile(&tree, io, render_options, .stdout()),
+    }
+
+    if (stats_mode != .no) {
+        const indices = try init.arena.allocator().alloc(Ast.Node.Index, tree.nodes.len);
+        for (0.., indices) |i, *e| e.* = @fromBackingInt(@intCast(i));
+
+        const SortContext = struct {
+            ast_tree: *const Ast,
+            token_ends: []const u32,
+            fail_count: *std.atomic.Value(usize),
+            ok_count: *std.atomic.Value(usize),
+
+            pub fn firstTokenStart(ast_tree: *const Ast, node: Ast.Node.Index) u32 {
+                return ast_tree.tokenStart(ast_tree.firstToken(node));
+            }
+            pub fn lastTokenEnd(ast_tree: *const Ast, node: Ast.Node.Index) u32 {
+                const last = ast_tree.lastToken(node);
+                return ast_tree.tokenStart(last) + @as(u32, @intCast(ast_tree.tokenSlice(last).len));
+            }
+
+            pub fn lessThan(ctx: @This(), a: Ast.Node.Index, b: Ast.Node.Index) bool {
+                const a_start = firstTokenStart(ctx.ast_tree, a);
+                const b_start = firstTokenStart(ctx.ast_tree, b);
+                if (a_start != b_start) return a_start < b_start;
+                // return lastTokenEnd(ctx.ast_tree, a) < lastTokenEnd(ctx.ast_tree, b);
+                return ctx.token_ends[@backingInt(a)] < ctx.token_ends[@backingInt(b)];
+            }
+
+            fn checkRangeIndicesOverlap(ctx: @This(), index_list: []const Ast.Node.Index, first_index: usize, last_index: usize) void {
+                std.debug.print("check task: {}..{}\n", .{first_index, last_index});
+                const sublice = index_list[first_index..last_index];
+                var fail_count: usize = 0;
+                var ok_count: usize = 0;
+                for (first_index..last_index, sublice) |i, a| for (index_list[i..]) |b| {
+                    const a_start = firstTokenStart(ctx.ast_tree, a);
+                    const b_start = firstTokenStart(ctx.ast_tree, b);
+                    std.debug.assert(b_start >= a_start);
+                    const a_end = ctx.token_ends[@backingInt(a)];
+                    const b_end = ctx.token_ends[@backingInt(b)];
+
+                    const is_not_ok = b_start > a_start and b_start < a_end and b_end > a_end;
+                    if (is_not_ok) {
+                        @branchHint(.unlikely);
+                        fail_count += 1;
+                        std.debug.print("[!] nodes {} & {} overlap: ({},{}) :: ({}, {})\n", .{
+                            a, b,
+                            a_start, a_end,
+                            b_start, b_end,
+                        });
+                    } else {
+                        ok_count += 1;
+                    }
+                };
+                _ = ctx.ok_count.fetchAdd(ok_count, .acq_rel);
+                _ = ctx.fail_count.fetchAdd(fail_count, .acq_rel);
+            }
+        };
+
+        const token_ends = try init.arena.allocator().alloc(u32, tree.nodes.len);
+        for (indices, token_ends) |node, *token_end| {
+            token_end.* = SortContext.lastTokenEnd(&tree, node);
+        }
+
+        var fail_count: std.atomic.Value(usize) = .init(0);
+        var ok_count: std.atomic.Value(usize) = .init(0);
+        const ctx: SortContext = .{
+            .ast_tree = &tree,
+            .token_ends = token_ends,
+            .ok_count = &ok_count,
+            .fail_count = &fail_count,
+        };
+
+        std.mem.sortUnstable(Ast.Node.Index, indices, ctx, SortContext.lessThan);
+
+        if (stats_mode != .only_check) {
+            var stderr_buffer: [4096]u8 = undefined;
+            var stderr_file_writer = std.Io.File.writerStreaming(.stderr(), io, &stderr_buffer);
+            const w = &stderr_file_writer.interface;
+            try w.writeAll("\n---- Stats ----\n");
+            for (indices) |node| {
+                const start = SortContext.firstTokenStart(&tree, node);
+                // const end = SortContext.lastTokenEnd(&tree, node);
+                const end = token_ends[@backingInt(node)];
+                try w.print("- {: <5} .{s: <25} :: {: <6}, {: <6}\n", .{
+                    @backingInt(node), @tagName(tree.nodeTag(node)),
+                    start,
+                    end,
+                });
+            }
+            try w.writeByte('\n');
+            try w.flush();
+        }
+
+        var group: std.Io.Group = .init;
+
+        const want_block_size: usize = 2_000;
+        const suggested_num_threads = @max(@divCeil(indices.len, want_block_size), 1);
+        const num_threads: usize = @max(@min((try std.Thread.getCpuCount()) -| 1, suggested_num_threads), 1);
+
+        const block_size = indices.len / num_threads;
+        std.debug.print("Spawning {} threads\n", .{num_threads-1});
+
+        for (0..num_threads-1) |thread_index| {
+            try group.concurrent(io, SortContext.checkRangeIndicesOverlap, .{
+                ctx,
+                indices,
+                thread_index*block_size,
+                (thread_index+1)*block_size,
+            });
+        }
+
+        ctx.checkRangeIndicesOverlap(indices, block_size * (num_threads-1), indices.len);
+        try group.await(io);
+
+        std.debug.print("\nTotal nodes: {}\n", .{indices.len});
+        std.debug.print("OK   count: {}\n", .{ok_count.load(.acquire)});
+        std.debug.print("FAIL count: {}\n", .{fail_count.load(.acquire)});
+    }
 
     return 0;
 }
