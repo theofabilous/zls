@@ -1040,6 +1040,7 @@ pub fn main(init: std.process.Init) !u8 {
 
         const SortContext = struct {
             ast_tree: *const Ast,
+            token_starts: []const u32,
             token_ends: []const u32,
             fail_count: *std.atomic.Value(usize),
             ok_count: *std.atomic.Value(usize),
@@ -1053,8 +1054,10 @@ pub fn main(init: std.process.Init) !u8 {
             }
 
             pub fn lessThan(ctx: @This(), a: Ast.Node.Index, b: Ast.Node.Index) bool {
-                const a_start = firstTokenStart(ctx.ast_tree, a);
-                const b_start = firstTokenStart(ctx.ast_tree, b);
+                // const a_start = firstTokenStart(ctx.ast_tree, a);
+                // const b_start = firstTokenStart(ctx.ast_tree, b);
+                const a_start = ctx.token_starts[@backingInt(a)];
+                const b_start = ctx.token_starts[@backingInt(b)];
                 if (a_start != b_start) return a_start < b_start;
                 // return lastTokenEnd(ctx.ast_tree, a) < lastTokenEnd(ctx.ast_tree, b);
                 return ctx.token_ends[@backingInt(a)] < ctx.token_ends[@backingInt(b)];
@@ -1066,8 +1069,10 @@ pub fn main(init: std.process.Init) !u8 {
                 var fail_count: usize = 0;
                 var ok_count: usize = 0;
                 for (first_index..last_index, sublice) |i, a| for (index_list[i..]) |b| {
-                    const a_start = firstTokenStart(ctx.ast_tree, a);
-                    const b_start = firstTokenStart(ctx.ast_tree, b);
+                    const a_start = ctx.token_starts[@backingInt(a)];
+                    const b_start = ctx.token_starts[@backingInt(b)];
+                    // const a_start = firstTokenStart(ctx.ast_tree, a);
+                    // const b_start = firstTokenStart(ctx.ast_tree, b);
                     std.debug.assert(b_start >= a_start);
                     const a_end = ctx.token_ends[@backingInt(a)];
                     const b_end = ctx.token_ends[@backingInt(b)];
@@ -1095,11 +1100,17 @@ pub fn main(init: std.process.Init) !u8 {
             token_end.* = SortContext.lastTokenEnd(&tree, node);
         }
 
+        const token_starts = try init.arena.allocator().alloc(u32, tree.nodes.len);
+        for (indices, token_starts) |node, *token_start| {
+            token_start.* = SortContext.firstTokenStart(&tree, node);
+        }
+
         var fail_count: std.atomic.Value(usize) = .init(0);
         var ok_count: std.atomic.Value(usize) = .init(0);
         const ctx: SortContext = .{
             .ast_tree = &tree,
             .token_ends = token_ends,
+            .token_starts = token_starts,
             .ok_count = &ok_count,
             .fail_count = &fail_count,
         };
