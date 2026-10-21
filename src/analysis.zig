@@ -5216,107 +5216,100 @@ const NormalizedNodeData = struct {
             Ast.TokenIndex => try nnd.tokens.appendBounded(item),
             Ast.OptionalTokenIndex => if (item.unwrap()) |token| try nnd.tokens.appendBounded(token),
             Ast.ExtraIndex => nnd.extra = item,
-            // handled elsewhere
-            Ast.Node.For => {},
             else => comptime unreachable,
         }
     }
 
-    fn addContiguousChildren(nnd: *NormalizedNodeData, slice: []const Ast.Node.Index) void {
+    fn setContiguousChildren(nnd: *NormalizedNodeData, slice: []const Ast.Node.Index) void {
         std.debug.assert(nnd.contiguous_children.len == 0);
         nnd.contiguous_children = slice;
     }
 
-    fn fill(
-        nnd: *NormalizedNodeData,
-        node: Ast.Node.Index,
-        opt_variant: ?AstNodeDataVariant,
-        node_tag: Ast.Node.Tag,
-        tree: *const Ast
-    ) error{OutOfMemory}!void {
+    fn fill(nnd: *NormalizedNodeData, node: Ast.Node.Index, node_tag: Ast.Node.Tag, tree: *const Ast) error{OutOfMemory}!void {
         try nnd.addItem(tree.nodeMainToken(node));
-        const variant = opt_variant orelse return;
+        const variant = nodeTagGetDataPayloadVariant(node_tag) orelse return;
         const data = tree.nodeData(node);
         switch (variant) {
             // .extra_range is *always* a range of ast node indices
-            .extra_range => nnd.addContiguousChildren(tree.extraDataSlice(data.extra_range, Ast.Node.Index)),
+            .extra_range => nnd.setContiguousChildren(tree.extraDataSlice(data.extra_range, Ast.Node.Index)),
             .node => try nnd.addItem(data.node),
             .opt_node => try nnd.addItem(data.opt_node),
             .token => try nnd.addItem(data.token),
+            .@"for" => {
+                const for_full = tree.forFull(node);
+                nnd.setContiguousChildren(for_full.ast.inputs);
+                try nnd.addItem(for_full.ast.then_expr);
+                try nnd.addItem(for_full.ast.else_expr);
+            },
+            // this prong handles all the other payload types, all of which are tuples
+            // whose elements are node indices, token indices or extra indices
             inline else => |t| switch (@typeInfo(@FieldType(Ast.Node.Data, @tagName(t)))) {
-                .@"struct" => {
-                    inline for (@field(data, @tagName(t))) |item| try nnd.addItem(item);
-                },
+                .@"struct" => inline for (@field(data, @tagName(t))) |item| try nnd.addItem(item),
                 else => comptime unreachable,
             },
         }
-        if (nnd.extra) |extra_index| {
-            switch (node_tag) {
-                inline .global_var_decl,
-                .local_var_decl,
-                .container_field,
-                .slice,
-                .slice_sentinel,
-                .@"while",
-                .while_cont,
-                .@"if",
-                .array_type_sentinel,
-                .fn_proto_one,
-                => |t| {
-                    const Payload = switch (t) {
-                        .global_var_decl => Ast.Node.GlobalVarDecl,
-                        .local_var_decl => Ast.Node.LocalVarDecl,
-                        .container_field => Ast.Node.ContainerField,
-                        .slice => Ast.Node.Slice,
-                        .slice_sentinel => Ast.Node.SliceSentinel,
-                        .@"while" => Ast.Node.While,
-                        .while_cont => Ast.Node.WhileCont,
-                        .@"if" => Ast.Node.If,
-                        .array_type_sentinel => Ast.Node.ArrayTypeSentinel,
-                        .fn_proto_one => Ast.Node.FnProtoOne,
-                        else => comptime unreachable,
-                    };
-                    const extra = tree.extraData(extra_index, Payload);
-                    const info = @typeInfo(Payload).@"struct";
-                    inline for (info.field_names) |field_name| {
-                        try nnd.addItem(@field(extra, field_name));
-                    }
-                },
-                .@"for" => {
-                    const for_full = tree.forFull(node);
-                    nnd.addContiguousChildren(for_full.ast.inputs);
-                    try nnd.addItem(for_full.ast.then_expr);
-                    try nnd.addItem(for_full.ast.else_expr);
-                },
-                .fn_proto => {
-                    const extra = tree.extraData(extra_index, Ast.Node.FnProto);
-                    const subrange: Ast.Node.SubRange = .{ .start = extra.params_start, .end = extra.params_end };
-                    nnd.addContiguousChildren(tree.extraDataSlice(subrange, Ast.Node.Index));
-                },
-                .fn_proto_multi,
-                .struct_init,
-                .struct_init_comma,
-                .call,
-                .call_comma,
-                .@"switch",
-                .switch_comma,
-                .switch_case,
-                .container_decl_arg,
-                .container_decl_arg_trailing,
-                .tagged_union_enum_tag,
-                .tagged_union_enum_tag_trailing,
-                => {
-                    const extra = tree.extraData(extra_index, Ast.Node.SubRange);
-                    nnd.addContiguousChildren(tree.extraDataSlice(extra, Ast.Node.Index));
-                },
-                .@"asm" => {
-                    const extra = tree.extraData(extra_index, Ast.Node.Asm);
-                    const subrange: Ast.Node.SubRange = .{ .start = extra.items_start, .end = extra.items_end };
-                    nnd.addContiguousChildren(tree.extraDataSlice(subrange, Ast.Node.Index));
-                },
-                else => unreachable,
-            }
-        }
+        if (nnd.extra) |extra_index| switch (node_tag) {
+            inline .global_var_decl,
+            .local_var_decl,
+            .container_field,
+            .slice,
+            .slice_sentinel,
+            .@"while",
+            .while_cont,
+            .@"if",
+            .array_type_sentinel,
+            .fn_proto_one,
+            => |t| {
+                const Payload = switch (t) {
+                    .global_var_decl => Ast.Node.GlobalVarDecl,
+                    .local_var_decl => Ast.Node.LocalVarDecl,
+                    .container_field => Ast.Node.ContainerField,
+                    .slice => Ast.Node.Slice,
+                    .slice_sentinel => Ast.Node.SliceSentinel,
+                    .@"while" => Ast.Node.While,
+                    .while_cont => Ast.Node.WhileCont,
+                    .@"if" => Ast.Node.If,
+                    .array_type_sentinel => Ast.Node.ArrayTypeSentinel,
+                    .fn_proto_one => Ast.Node.FnProtoOne,
+                    else => comptime unreachable,
+                };
+                const extra = tree.extraData(extra_index, Payload);
+                const info = @typeInfo(Payload).@"struct";
+                inline for (info.field_names) |field_name| {
+                    try nnd.addItem(@field(extra, field_name));
+                }
+            },
+            .fn_proto => {
+                const extra = tree.extraData(extra_index, Ast.Node.FnProto);
+                const subrange: Ast.Node.SubRange = .{ .start = extra.params_start, .end = extra.params_end };
+                nnd.setContiguousChildren(tree.extraDataSlice(subrange, Ast.Node.Index));
+            },
+            .fn_proto_multi,
+            .struct_init,
+            .struct_init_comma,
+            .call,
+            .call_comma,
+            .@"switch",
+            .switch_comma,
+            .switch_case,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            => {
+                const extra = tree.extraData(extra_index, Ast.Node.SubRange);
+                nnd.setContiguousChildren(tree.extraDataSlice(extra, Ast.Node.Index));
+            },
+            .@"asm" => {
+                const extra = tree.extraData(extra_index, Ast.Node.Asm);
+                const subrange: Ast.Node.SubRange = .{ .start = extra.items_start, .end = extra.items_end };
+                nnd.setContiguousChildren(tree.extraDataSlice(subrange, Ast.Node.Index));
+            },
+            // the `for` payload has an `extra_index` but we handle that case directly
+            // since only one node tag has this payload
+            .@"for" => unreachable,
+            else => unreachable,
+        };
     }
 };
 
@@ -5405,7 +5398,6 @@ fn searchForNodeOfTypeInternal(
         }
     }
 
-    const opt_variant = nodeTagGetDataPayloadVariant(node_tag);
     var node_buffer: [8]Ast.Node.Index = undefined;
     var token_buffer: [3]Ast.TokenIndex = undefined;
     var normalized_data: NormalizedNodeData = .{
@@ -5413,7 +5405,7 @@ fn searchForNodeOfTypeInternal(
         .tokens = .initBuffer(&token_buffer),
     };
 
-    NormalizedNodeData.fill(&normalized_data, node, opt_variant, node_tag, tree) catch |err| switch (err) {
+    NormalizedNodeData.fill(&normalized_data, node, node_tag, tree) catch |err| switch (err) {
         error.OutOfMemory => log.debug("Maximum expected token/node count exceeded", .{}),
     };
 
