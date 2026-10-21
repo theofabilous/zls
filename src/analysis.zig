@@ -5331,30 +5331,10 @@ const NodeSearch = struct {
     };
 
     const Result = enum {
-        found,
+        in_range,
         found_exact,
-        ///                        <search cursor>
-        ///                    [<-- node token span ....
-        ///                    [<- first token ->]  ....
-        ///                [<--query-->]
-        ///     [<--query-->]
-        ///
-        /// The search cursor is "too far to the right" with respect to the token stream.
-        /// I.e. a token pos that forms the left-edge in a token range is beyond the start of our query range.
-        ///
-        /// first_token_pos > query.source_range.start
-        out_of_range_right,
-        /// <search cursor>
-        /// ... node token span -->]
-        ///       [<- last token ->]
-        ///               [<--query-->]
-        ///                          [<--query-->]
-        ///
-        /// The search cursor is "too far to the left" with respect to the token stream.
-        /// I.e. a token pos that forms the right-edge in a token range is beyond the start of our query range.
-        ///
-        /// last_token_end_pos < query.source_range.end
-        out_of_range_left,
+        node_is_after_query,
+        node_is_before_query,
     };
 
     const Context = struct {
@@ -5381,12 +5361,12 @@ fn searchForNodeOfTypeInternal(
     var loc: offsets.Loc = undefined;
     loc.start = tree.tokenStart(tree.firstToken(node));
     if (loc.start > query.source_range.start) {
-        return .out_of_range_right;
+        return .node_is_after_query;
     }
     const last_token = tree.lastToken(node);
     loc.end = @as(usize, tree.tokenStart(last_token)) + tree.tokenSlice(last_token).len;
     if (loc.end < query.source_range.end) {
-        return .out_of_range_left;
+        return .node_is_before_query;
     }
     if (ctx.current_range.start <= loc.start and ctx.current_range.end >= loc.end) {
         ctx.current_range = loc;
@@ -5440,12 +5420,12 @@ fn searchForNodeOfTypeInternal(
     for (normalized_data.contiguous_children) |child| {
         switch (searchForNodeOfTypeInternal(tree, child, query, ctx)) {
             .found_exact => |t| return t,
-            .out_of_range_right => break,
+            .node_is_after_query => break,
             else => {},
         }
     }
 
-    return .found;
+    return .in_range;
 }
 
 fn searchForNodeOfType(
@@ -5458,7 +5438,7 @@ fn searchForNodeOfType(
     var ctx: NodeSearch.Context = .init;
     const result = searchForNodeOfTypeInternal(&handle.tree, node, query, &ctx);
     const result_node = switch (result) {
-        .found, .found_exact => ctx.candidate.unwrap(),
+        .in_range, .found_exact => ctx.candidate.unwrap(),
         else => null,
     };
     if (result_node == null) {
