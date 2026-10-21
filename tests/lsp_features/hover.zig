@@ -1386,6 +1386,12 @@ test "properties on @as() expressions" {
         \\foo: u32 = 0
         \\(u32)
     , .{ .markup_kind = .plaintext });
+    try testHoverWithOptions(
+        \\comptime { _ = @as(struct { foo: u32 = 0 }, .{}).foo<cursor>; }
+    ,
+        \\foo: u32 = 0
+        \\(u32)
+    , .{ .markup_kind = .plaintext });
 }
 
 test "optional unwrap" {
