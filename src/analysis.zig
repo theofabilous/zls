@@ -5000,6 +5000,15 @@ pub fn getFieldAccessType(
     var do_unwrap_error_payload = false; // .keyword_try seen, ie `(try foo())`
 
     const opt_scope_node = try scopeAstNodeContainingSourceIndex(handle, loc.start + tokenizer.index);
+    if (opt_scope_node) |scope_node| {
+        const node_loc = offsets.nodeToLoc(&handle.tree, scope_node);
+        log.debug("getFieldAccessType: scope_node({}) {}", .{
+            @backingInt(scope_node),
+            node_loc,
+        });
+    } else {
+        log.debug("getFieldAccessType: scope_node is null", .{});
+    }
 
     while (true) {
         const tok = tokenizer.next();
@@ -5224,7 +5233,30 @@ pub fn getFieldAccessType(
                             },
                             else => {},
                         }
-                    } else break :use_node;
+                    } else x: {
+                        const start_index, const end_index = ast.hiddenMemberRangeMaybeOverlappingIndex(
+                            &handle.tree,
+                            scope_node,
+                            needle_loc.start
+                        ) orelse break :use_node;
+                        for (@backingInt(start_index)..@backingInt(end_index)) |node_index| {
+                            const node: Ast.Node.Index = @fromBackingInt(@intCast(node_index));
+                            switch (handle.tree.nodeTag(node)) {
+                                .builtin_call,
+                                .builtin_call_two,
+                                .builtin_call_two_comma,
+                                .builtin_call_comma,
+                                => {
+                                    const this_loc = offsets.tokenToLoc(&handle.tree, handle.tree.nodeMainToken(node));
+                                    if (this_loc.start == needle_loc.start) {
+                                        std.debug.assert(this_loc.end == needle_loc.end);
+                                        break :x node;
+                                    }
+                                },
+                                else => {},
+                            }
+                        } else break :use_node;
+                    };
 
                     if (try analyser.resolveTypeOfNodeInternal(.of(binfn_node, handle))) |ty| {
                         current_type = ty;

@@ -3233,6 +3233,20 @@ test "@field" {
     , &.{
         .{ .label = "peripherals", .kind = .Struct, .detail = "type" },
     });
+    try testCompletion(
+        \\pub const chip_mod = struct {
+        \\    pub const devices = struct {
+        \\        pub const chip1 = struct {
+        \\            pub const peripherals = struct {};
+        \\        };
+        \\    };
+        \\};
+        \\test {
+        \\    _ = @field(chip_mod.devices, "chip1").<cursor>
+        \\}
+    , &.{
+        .{ .label = "peripherals", .kind = .Struct, .detail = "type" },
+    });
 }
 
 test "@FieldType" {
@@ -3250,6 +3264,19 @@ test "@FieldType" {
     , &.{
         .{ .label = "alpha", .kind = .Field, .detail = "u32" },
     });
+    try testCompletion(
+        \\test {
+        \\    const Foo = struct {
+        \\        const alpha = u32;
+        \\    };
+        \\    const Bar = struct {
+        \\        beta: Foo,
+        \\    };
+        \\    const foo = @FieldType(Bar, "beta").<cursor>
+        \\}
+    , &.{
+        .{ .label = "alpha", .kind = .Constant, .detail = "u32" },
+    });
 }
 
 test "@extern" {
@@ -3260,6 +3287,17 @@ test "@extern" {
         \\    };
         \\    const foo = @extern(*S, .{});
         \\    foo.<cursor>
+        \\}
+    , &.{
+        .{ .label = "*", .kind = .Operator, .detail = "S" },
+        .{ .label = "alpha", .kind = .Field, .detail = "u32" },
+    });
+    try testCompletion(
+        \\test {
+        \\    const S = struct {
+        \\        alpha: u32,
+        \\    };
+        \\    _ = @extern(*S, .{}).<cursor>
         \\}
     , &.{
         .{ .label = "*", .kind = .Operator, .detail = "S" },
