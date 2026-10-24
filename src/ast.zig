@@ -1778,25 +1778,24 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
     // syntax errors which "hide" members within containers don't actually hide nodes when
     // inside a block. That might not be always true though, needs investigation
     std.debug.assert(tree.mode == .zig);
-    const container_loc = offsets.nodeToLoc(tree, container_node);
+    const first_token = tree.firstToken(container_node);
+    const container_loc = offsets.tokensToLoc(tree, first_token, lastToken(tree, container_node));
     std.debug.assert(container_loc.start <= source_index and source_index < container_loc.end);
     if (tree.errors.len == 0) return null;
     const node_tag = tree.nodeTag(container_node);
     var buffer: [2]Ast.Node.Index = undefined;
     const container = tree.fullContainerDecl(&buffer, container_node) orelse return null;
     if (container.ast.members.len == 0) {
-        // XXX we can't currently handle this
-        // - custom `lastToken` implementation does not work for containers with empty
-        //   member lists (different code path, might be an easy fix)
-        // - handling this situation requires also solving the problem where the source
-        //   index resides in a child node that occurs before the first member list
-        //   element (described a few lines below)
+        // XXX we can't currently handle this, custom `lastToken` implementation does not work for containers
+        // with empty member lists (different code path, might be an easy fix). Otherwise, for non-root
+        // containers, handling this would be similar to handling non-root containers when we don't have a
+        // left-edge *but* we should be using the container node itself as both the starting point for the
+        // scan *and* as the right-edge in the returned range. i think.
         return null;
     }
     // TODO consider binary search for large member lists?
     const next_member = for (0.., container.ast.members) |i, member| {
-        // container node indices appear *after* those of their children (except for root, of course, because it
-        // is always index 0)
+        // non-root container nodes appear *after* their children
         if (node_tag != .root) {
             std.debug.assert(@backingInt(member) < @backingInt(container_node));
         }
@@ -1812,18 +1811,19 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
     } else container.ast.members.len;
     var edge_nodes: [2]Ast.Node.Index = undefined;
     if (next_member == 0) {
-        if (node_tag != .root) {
-            // We don't yet have a reliable left-bound for the node indices of a non-root
-            // container's children and we specifically want to return an optimistic
-            // range. This isn't an issue for .root because its left-edge is always the
-            // root node (index 0).
-            //
-            // Eventually, we could allow the user to pass in the "parent" node or
-            // something so that we can inspect the parent to decide if we can determine
-            // some bounds, but for now just abort
-            return null;
-        }
-        edge_nodes = .{ .root, container.ast.members[0] };
+        edge_nodes = switch (node_tag) {
+            .root => .{ .root, container.ast.members[0] },
+            else => x: {
+                // scan backwards until we're out of the container's range
+                var curr_index = @backingInt(container.ast.members[0]);
+                while (curr_index > 0) : (curr_index -= 1) {
+                    if (tree.nodeMainToken(@fromBackingInt(curr_index)) < first_token) {
+                        break;
+                    }
+                } else return null;
+                break :x .{ @fromBackingInt(curr_index + 1), container.ast.members[0] };
+            },
+        };
     } else if (next_member == container.ast.members.len) {
         edge_nodes = .{
             container.ast.members[container.ast.members.len - 1],
@@ -1848,15 +1848,11 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
 
 test hiddenMemberRangeMaybeOverlappingIndex {
     const test_sources = [_][:0]const u8{
-        // FIXME: this test case will fail if nested in a subcontainer because we don't
-        // yet have a generalized way to find a nice "left-bound" for the nodes that are
-        // children of a non-root container
-        //
-        // \\const baz = @FieldType(Bar, "foo").
-        // \\const Foo = struct {};
-        // \\const Bar = struct { foo: Foo, };
-        // \\
-        // ,
+        \\const baz = @FieldType(Bar, "foo").
+        \\const Foo = struct {};
+        \\const Bar = struct { foo: Foo, };
+        \\
+        ,
         \\const Foo = struct {};
         \\const baz = @FieldType(Bar, "foo").
         \\const Bar = struct { foo: Foo, };
