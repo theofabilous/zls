@@ -781,19 +781,19 @@ pub fn lastToken(tree: *const Ast, node: Node.Index) Ast.TokenIndex {
         => |tag| {
             var buffer: [2]Ast.Node.Index = undefined;
             const container_decl = tree.fullContainerDecl(&buffer, n).?;
+            var last_token: Ast.TokenIndex = undefined;
             if (container_decl.ast.members.len == 0) {
                 if (container_decl.ast.arg.unwrap()) |arg| {
-                    end_offset += 4; // rparen + rparen + lbrace + rbrace
-                    n = arg;
+                    last_token = lastToken(tree, arg) + 3; // rparen + lbrace + rbrace
                 } else {
                     var i: u32 = switch (tag) {
                         .container_decl_two, .container_decl_two_trailing => 2, // lbrace + rbrace
+                        // XXX: union (enum(<int>)) is valid syntax
                         .tagged_union_two, .tagged_union_two_trailing => 5, // (enum) {}
                         else => unreachable,
                     };
                     while (tree.tokenTag(tree.nodeMainToken(n) + i) == .container_doc_comment) i += 1;
-                    end_offset += i;
-                    break tree.nodeMainToken(n);
+                    last_token = i + tree.nodeMainToken(n);
                 }
             } else {
                 const has_comma = switch (tag) {
@@ -802,9 +802,9 @@ pub fn lastToken(tree: *const Ast, node: Node.Index) Ast.TokenIndex {
                     else => unreachable,
                 };
                 const last_member = container_decl.ast.members[container_decl.ast.members.len - 1];
-                const last_token = lastToken(tree, last_member) + @intFromBool(has_comma) + 1; // rbrace
-                break findMatchingRBrace(tree, last_token) orelse last_token;
+                last_token = lastToken(tree, last_member) + @intFromBool(has_comma) + 1; // rbrace
             }
+            break findMatchingRBrace(tree, last_token) orelse last_token;
         },
 
         .container_field_init,
@@ -1785,14 +1785,6 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
     const node_tag = tree.nodeTag(container_node);
     var buffer: [2]Ast.Node.Index = undefined;
     const container = tree.fullContainerDecl(&buffer, container_node) orelse return null;
-    if (container.ast.members.len == 0) {
-        // XXX we can't currently handle this, custom `lastToken` implementation does not work for containers
-        // with empty member lists (different code path, might be an easy fix). Otherwise, for non-root
-        // containers, handling this would be similar to handling non-root containers when we don't have a
-        // left-edge *but* we should be using the container node itself as both the starting point for the
-        // scan *and* as the right-edge in the returned range. i think.
-        return null;
-    }
     // TODO consider binary search for large member lists?
     const next_member = for (0.., container.ast.members) |i, member| {
         // non-root container nodes appear *after* their children
@@ -1809,8 +1801,24 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
             return null;
         }
     } else container.ast.members.len;
+    // TODO we can sometimes use container-type-specific nodes for left-edges tagged
+    // unions, enums with backing int, bitpacked containers with backing int, ...
     var edge_nodes: [2]Ast.Node.Index = undefined;
-    if (next_member == 0) {
+    if (container.ast.members.len == 0) {
+        edge_nodes = switch (node_tag) {
+            .root => .{ .root, @fromBackingInt(@intCast(tree.nodes.len)) },
+            else => x: {
+                // scan backwards until we're out of the container's range
+                var curr_index = @backingInt(container_node);
+                while (curr_index > 0) : (curr_index -= 1) {
+                    if (tree.nodeMainToken(@fromBackingInt(curr_index)) < first_token) {
+                        break;
+                    }
+                } else return null;
+                break :x .{ @fromBackingInt(curr_index + 1), container_node };
+            },
+        };
+    } else if (next_member == 0) {
         edge_nodes = switch (node_tag) {
             .root => .{ .root, container.ast.members[0] },
             else => x: {
@@ -1848,6 +1856,9 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
 
 test hiddenMemberRangeMaybeOverlappingIndex {
     const test_sources = [_][:0]const u8{
+        \\const baz = @FieldType(Bar, "foo").
+        \\
+        ,
         \\const baz = @FieldType(Bar, "foo").
         \\const Foo = struct {};
         \\const Bar = struct { foo: Foo, };
