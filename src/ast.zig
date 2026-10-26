@@ -1785,14 +1785,23 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
     const node_tag = tree.nodeTag(container_node);
     var buffer: [2]Ast.Node.Index = undefined;
     const container = tree.fullContainerDecl(&buffer, container_node) orelse return null;
+    const NextMember = union(enum) {
+        index: usize,
+        empty,
+        before_first,
+        after_last,
+    };
     // TODO consider binary search for large member lists?
-    const next_member = for (0.., container.ast.members) |i, member| {
+    const next_member: NextMember = for (0.., container.ast.members) |i, member| {
         // non-root container nodes appear *after* their children
         if (node_tag != .root) {
             std.debug.assert(@backingInt(member) < @backingInt(container_node));
         }
         const this_loc = offsets.nodeToLoc(tree, member);
-        if (this_loc.start > source_index) break i;
+        if (this_loc.start > source_index) break switch (i) {
+            0 => .before_first,
+            else => |index| .{ .index = index },
+        };
         if (this_loc.end > source_index) {
             // we're specifically looking for nodes that were omitted from the member
             // list, but we found a member that overlaps the index. the specific kind of
@@ -1800,53 +1809,41 @@ pub fn hiddenMemberRangeMaybeOverlappingIndex(
             // this way, so abort.
             return null;
         }
-    } else container.ast.members.len;
+    } else switch (container.ast.members.len) {
+        0 => .empty,
+        else => .after_last,
+    };
     // TODO we can sometimes use container-type-specific nodes for left-edges tagged
     // unions, enums with backing int, bitpacked containers with backing int, ...
-    var edge_nodes: [2]Ast.Node.Index = undefined;
-    if (container.ast.members.len == 0) {
-        edge_nodes = switch (node_tag) {
-            .root => .{ .root, @fromBackingInt(@intCast(tree.nodes.len)) },
-            else => x: {
-                // scan backwards until we're out of the container's range
-                var curr_index = @backingInt(container_node);
-                while (curr_index > 0) : (curr_index -= 1) {
-                    if (tree.nodeMainToken(@fromBackingInt(curr_index)) < first_token) {
-                        break;
-                    }
-                } else return null;
-                break :x .{ @fromBackingInt(curr_index + 1), container_node };
-            },
-        };
-    } else if (next_member == 0) {
-        edge_nodes = switch (node_tag) {
-            .root => .{ .root, container.ast.members[0] },
-            else => x: {
-                // scan backwards until we're out of the container's range
-                var curr_index = @backingInt(container.ast.members[0]);
-                while (curr_index > 0) : (curr_index -= 1) {
-                    if (tree.nodeMainToken(@fromBackingInt(curr_index)) < first_token) {
-                        break;
-                    }
-                } else return null;
-                break :x .{ @fromBackingInt(curr_index + 1), container.ast.members[0] };
-            },
-        };
-    } else if (next_member == container.ast.members.len) {
-        edge_nodes = .{
-            container.ast.members[container.ast.members.len - 1],
-            switch (node_tag) {
+    const edge_nodes: [2]Ast.Node.Index = switch (node_tag) {
+        .root => switch (next_member) {
+            .empty => .{ .root, @fromBackingInt(@intCast(tree.nodes.len)) },
+            .before_first => .{ .root, container.ast.members[0] },
+            .after_last => .{
+                container.ast.members[container.ast.members.len - 1],
                 // recall that the range is end-exclusive
-                .root => @fromBackingInt(@intCast(tree.nodes.len)),
-                else => container_node,
+                @fromBackingInt(@intCast(tree.nodes.len)),
             },
-        };
-    } else {
-        edge_nodes = .{
-            container.ast.members[next_member - 1],
-            container.ast.members[next_member],
-        };
-    }
+            .index => |index| .{ container.ast.members[index - 1], container.ast.members[index] },
+        },
+        else => switch (next_member) {
+            .empty, .before_first => |_, t| x: {
+                const right_edge = switch (t) {
+                    .empty => container_node,
+                    .before_first => container.ast.members[0],
+                    else => unreachable,
+                };
+                // scan backwards until we're out of the container's range
+                var curr_index = @backingInt(right_edge);
+                while (curr_index > 0) : (curr_index -= 1) {
+                    if (tree.nodeMainToken(@fromBackingInt(curr_index)) < first_token) break;
+                } else return null;
+                break :x .{ @fromBackingInt(curr_index + 1), right_edge };
+            },
+            .after_last => .{ container.ast.members[container.ast.members.len - 1], container_node },
+            .index => |index| .{ container.ast.members[index - 1], container.ast.members[index] },
+        },
+    };
     const start_index = @backingInt(edge_nodes[0]) + 1;
     if (start_index >= @backingInt(edge_nodes[1])) {
         return null;
